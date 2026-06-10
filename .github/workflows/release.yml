@@ -17,13 +17,28 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # GPG is REQUIRED for the public Terraform Registry (signed checksums).
+      # It is optional here so a binary release is still produced when the
+      # secrets are not yet configured — those artifacts unblock a filesystem
+      # mirror for consumers (e.g. companyGPT CI) until the registry publish.
+      - name: Check for GPG secret
+        id: gpg_check
+        run: |
+          if [ -n "${{ secrets.GPG_PRIVATE_KEY }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GPG_PRIVATE_KEY not set — releasing UNSIGNED binaries (not registry-publishable). Add GPG_PRIVATE_KEY + GPG_PASSPHRASE and re-run to publish to the registry."
+          fi
       - name: Import GPG key
+        if: steps.gpg_check.outputs.present == 'true'
         uses: crazy-max/ghaction-import-gpg@v6
         id: import_gpg
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.GPG_PASSPHRASE }}
-      - name: Run GoReleaser
+      - name: Run GoReleaser (signed)
+        if: steps.gpg_check.outputs.present == 'true'
         uses: goreleaser/goreleaser-action@v6
         with:
           version: '~> v2'
@@ -31,3 +46,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+      - name: Run GoReleaser (unsigned fallback)
+        if: steps.gpg_check.outputs.present != 'true'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean --skip=sign
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
