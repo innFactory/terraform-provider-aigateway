@@ -67,6 +67,14 @@ func (p *aigatewayProvider) Configure(ctx context.Context, req provider.Configur
 	endpoint := strFromAttrOrEnv(data.Endpoint, "AIGATEWAY_ENDPOINT", "")
 	adminKey := strFromAttrOrEnv(data.AdminKey, "AIGATEWAY_ADMIN_API_KEY", "")
 
+	// Fully-unconfigured provider: declared but unused (e.g. a tenant without
+	// the gateway enabled in a shared monorepo). Leave the client nil; any
+	// resource that actually references this provider will fail clearly. This
+	// keeps `provider "aigateway"` safe to declare for every tenant.
+	if endpoint == "" && adminKey == "" {
+		return
+	}
+
 	if endpoint == "" {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("endpoint"),
