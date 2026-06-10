@@ -69,12 +69,13 @@ func (r *tenantSettingsResource) Configure(_ context.Context, req resource.Confi
 	r.client = req.ProviderData.(*httpClient)
 }
 
-// tenantPatchBody always transmits the managed fields. orgBudgetLimitMicrodollars
-// has NO omitempty: when the pointer is nil it serialises as JSON null, which
-// the gateway interprets as "unlimited".
+// tenantPatchBody always transmits the managed fields. The gateway interprets
+// orgBudgetLimitMicrodollars == 0 as "unlimited" (clears the cap); a positive
+// value sets the cap. (null would deserialise to None and leave it unchanged,
+// so we always send a concrete number.)
 type tenantPatchBody struct {
 	DefaultAllowedModels []string `json:"defaultAllowedModels"`
-	OrgBudgetMicros      *int64   `json:"orgBudgetLimitMicrodollars"`
+	OrgBudgetMicros      int64    `json:"orgBudgetLimitMicrodollars"`
 }
 
 type tenantAPI struct {
@@ -89,9 +90,9 @@ func (r *tenantSettingsResource) write(ctx context.Context, plan *tenantSettings
 		DefaultAllowedModels: listOrNil(ctx, plan.DefaultAllowedModels),
 	}
 	if plan.OrgBudgetUnlimited.ValueBool() {
-		body.OrgBudgetMicros = nil // → JSON null → unlimited
+		body.OrgBudgetMicros = 0 // 0 → unlimited (gateway clears the cap)
 	} else {
-		body.OrgBudgetMicros = int64Ptr(plan.OrgBudgetMicros)
+		body.OrgBudgetMicros = plan.OrgBudgetMicros.ValueInt64()
 	}
 	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/tenant", nil, body, nil); err != nil {
 		diags.err("Update tenant settings failed", err.Error())
