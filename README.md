@@ -26,7 +26,7 @@ terraform {
 }
 
 provider "aigateway" {
-  endpoint = "https://innfactory26.aigateway.agentic-web.eu"
+  endpoint = "https://gateway.example.com"
   # admin_api_key via env AIGATEWAY_ADMIN_API_KEY (matches GATEWAY_ADMIN_API_KEY on the gateway)
 }
 

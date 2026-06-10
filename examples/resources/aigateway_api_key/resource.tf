@@ -1,5 +1,5 @@
 resource "aigateway_api_key" "librechat" {
-  name = "librechat-innfactory26"
+  name = "librechat"
   # no budget_microdollars → unlimited
 }
 

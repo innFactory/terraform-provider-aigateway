@@ -44,7 +44,7 @@ func (p *aigatewayProvider) Schema(_ context.Context, _ provider.SchemaRequest, 
 		Attributes: map[string]schema.Attribute{
 			"endpoint": schema.StringAttribute{
 				Optional: true,
-				Description: "Base URL of the gateway, e.g. https://innfactory26.aigateway.agentic-web.eu. " +
+				Description: "Base URL of the gateway, e.g. https://gateway.example.com. " +
 					"Override via env AIGATEWAY_ENDPOINT.",
 			},
 			"admin_api_key": schema.StringAttribute{
