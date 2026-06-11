@@ -79,6 +79,15 @@ provider drives the live API). For an in-cluster/HTTP endpoint set
 | `aigateway_model` | a model bound to a provider | caller `model_id` |
 | `aigateway_api_key` | a gateway API key (plaintext returned once) | server `id` |
 | `aigateway_tenant_settings` | default allowed models + org budget (unlimited) | singleton |
+| `aigateway_deployment_group` | load-balance one model across many provider deployments (multi-region/provider) with strategy + retry + cooldown | per `model_id` |
+| `aigateway_fallback_chain` | ordered fallback models tried after a model's deployments are exhausted | per `model_id` |
+
+## Data sources
+
+| Data source | Looks up |
+|---|---|
+| `aigateway_provider` | an existing provider by `id` or `name` |
+| `aigateway_model` | an existing model by `model_id` |
 
 ## Development
 

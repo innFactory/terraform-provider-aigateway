@@ -115,11 +115,16 @@ func (p *aigatewayProvider) Resources(_ context.Context) []func() resource.Resou
 		newModelResource,
 		newAPIKeyResource,
 		newTenantSettingsResource,
+		newDeploymentGroupResource,
+		newFallbackChainResource,
 	}
 }
 
 func (p *aigatewayProvider) DataSources(_ context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{}
+	return []func() datasource.DataSource{
+		newProviderDataSource,
+		newModelDataSource,
+	}
 }
 
 func strFromAttrOrEnv(v types.String, envKey, fallback string) string {

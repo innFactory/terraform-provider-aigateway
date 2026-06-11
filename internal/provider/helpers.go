@@ -41,3 +41,12 @@ func int64Ptr(v types.Int64) *int64 {
 	x := v.ValueInt64()
 	return &x
 }
+
+// boolPtr returns a pointer to the bool value, or nil when null/unknown.
+func boolPtr(v types.Bool) *bool {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
+	}
+	x := v.ValueBool()
+	return &x
+}
