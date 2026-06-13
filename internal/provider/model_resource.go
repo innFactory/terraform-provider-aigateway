@@ -38,6 +38,7 @@ type modelResourceModel struct {
 	CachedMicros    types.Int64  `tfsdk:"cached_input_per_1m_tokens_microdollars"`
 	Enabled         types.Bool   `tfsdk:"enabled"`
 	IsDefault       types.Bool   `tfsdk:"is_default"`
+	PriceRegion     types.String `tfsdk:"price_region"`
 	ID              types.String `tfsdk:"id"`
 }
 
@@ -105,6 +106,14 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Computed:    true,
 				Description: "Whether this is the tenant default model.",
 			},
+			"price_region": schema.StringAttribute{
+				Optional: true,
+				Description: "ai-prices region.id to bill at for region/SKU-correct pricing " +
+					"(e.g. global-standard, eu-data-zone-standard, us-standard, europe-west1). " +
+					"When omitted, the gateway derives it from the deployment SKU / provider " +
+					"region, falling back to the global price. Pin this for Azure DataZone " +
+					"deployments so cache/token rates match the EU data-zone price.",
+			},
 			"id": schema.StringAttribute{
 				Computed:      true,
 				Description:   "Server-assigned internal id (model_<uuid>).",
@@ -134,6 +143,7 @@ type modelCreateBody struct {
 	CachedMicros    int64   `json:"cachedInputPer1mTokensMicrodollars"`
 	Enabled         bool    `json:"enabled"`
 	IsDefault       bool    `json:"isDefault"`
+	PriceRegion     *string `json:"priceRegion,omitempty"`
 }
 
 type modelUpdateBody struct {
@@ -146,22 +156,24 @@ type modelUpdateBody struct {
 	CachedMicros    *int64  `json:"cachedInputPer1mTokensMicrodollars,omitempty"`
 	Enabled         *bool   `json:"enabled,omitempty"`
 	IsDefault       *bool   `json:"isDefault,omitempty"`
+	PriceRegion     *string `json:"priceRegion,omitempty"`
 }
 
 type modelAPI struct {
-	ID              string `json:"id"`
-	ModelID         string `json:"modelId"`
-	DisplayName     string `json:"displayName"`
-	ProviderID      string `json:"providerId"`
-	ProviderModelID string `json:"providerModelId"`
-	DeploymentName  string `json:"deploymentName"`
-	Capability      string `json:"capability"`
-	ModelType       string `json:"modelType"`
-	InputMicros     int64  `json:"inputPer1mTokensMicrodollars"`
-	OutputMicros    int64  `json:"outputPer1mTokensMicrodollars"`
-	CachedMicros    int64  `json:"cachedInputPer1mTokensMicrodollars"`
-	Enabled         bool   `json:"enabled"`
-	IsDefault       bool   `json:"isDefault"`
+	ID              string  `json:"id"`
+	ModelID         string  `json:"modelId"`
+	DisplayName     string  `json:"displayName"`
+	ProviderID      string  `json:"providerId"`
+	ProviderModelID string  `json:"providerModelId"`
+	DeploymentName  string  `json:"deploymentName"`
+	Capability      string  `json:"capability"`
+	ModelType       string  `json:"modelType"`
+	InputMicros     int64   `json:"inputPer1mTokensMicrodollars"`
+	OutputMicros    int64   `json:"outputPer1mTokensMicrodollars"`
+	CachedMicros    int64   `json:"cachedInputPer1mTokensMicrodollars"`
+	Enabled         bool    `json:"enabled"`
+	IsDefault       bool    `json:"isDefault"`
+	PriceRegion     *string `json:"priceRegion"`
 }
 
 func defStr(v types.String, def string) string {
@@ -191,6 +203,7 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		CachedMicros:    plan.CachedMicros.ValueInt64(),
 		Enabled:         plan.Enabled.IsNull() || plan.Enabled.ValueBool(),
 		IsDefault:       plan.IsDefault.ValueBool(),
+		PriceRegion:     ptrIf(plan.PriceRegion),
 	}
 	var out modelAPI
 	if err := r.client.do(ctx, "POST", "/api/v1/admin/models", nil, body, &out); err != nil {
@@ -245,6 +258,7 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		CachedMicros:    &cached,
 		Enabled:         &enabled,
 		IsDefault:       &isDefault,
+		PriceRegion:     ptrIf(plan.PriceRegion),
 	}
 	var out modelAPI
 	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+plan.ModelID.ValueString(), nil, body, &out); err != nil {
@@ -286,4 +300,10 @@ func (r *modelResource) apply(m *modelResourceModel, a *modelAPI) {
 	m.CachedMicros = types.Int64Value(a.CachedMicros)
 	m.Enabled = types.BoolValue(a.Enabled)
 	m.IsDefault = types.BoolValue(a.IsDefault)
+	// price_region is Optional (not Computed): only reflect a server value when
+	// the response carries one, otherwise keep the planned/null value to avoid
+	// "inconsistent result" errors when unset.
+	if a.PriceRegion != nil && *a.PriceRegion != "" {
+		m.PriceRegion = types.StringValue(*a.PriceRegion)
+	}
 }
