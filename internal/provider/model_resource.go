@@ -39,6 +39,7 @@ type modelResourceModel struct {
 	Enabled         types.Bool   `tfsdk:"enabled"`
 	IsDefault       types.Bool   `tfsdk:"is_default"`
 	PriceRegion     types.String `tfsdk:"price_region"`
+	ManagedBy       types.String `tfsdk:"managed_by"`
 	ID              types.String `tfsdk:"id"`
 }
 
@@ -114,6 +115,10 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"region, falling back to the global price. Pin this for Azure DataZone " +
 					"deployments so cache/token rates match the EU data-zone price.",
 			},
+			"managed_by": schema.StringAttribute{
+				Optional:    true,
+				Description: "Free-form marker stored on the gateway object (e.g. companygpt-terraform) so the UI can flag IaC-managed providers/models.",
+			},
 			"id": schema.StringAttribute{
 				Computed:      true,
 				Description:   "Server-assigned internal id (model_<uuid>).",
@@ -144,6 +149,7 @@ type modelCreateBody struct {
 	Enabled         bool    `json:"enabled"`
 	IsDefault       bool    `json:"isDefault"`
 	PriceRegion     *string `json:"priceRegion,omitempty"`
+	ManagedBy       *string `json:"managedBy,omitempty"`
 }
 
 type modelUpdateBody struct {
@@ -157,6 +163,7 @@ type modelUpdateBody struct {
 	Enabled         *bool   `json:"enabled,omitempty"`
 	IsDefault       *bool   `json:"isDefault,omitempty"`
 	PriceRegion     *string `json:"priceRegion,omitempty"`
+	ManagedBy       *string `json:"managedBy,omitempty"`
 }
 
 type modelAPI struct {
@@ -174,6 +181,7 @@ type modelAPI struct {
 	Enabled         bool    `json:"enabled"`
 	IsDefault       bool    `json:"isDefault"`
 	PriceRegion     *string `json:"priceRegion"`
+	ManagedBy       string  `json:"managedBy"`
 }
 
 func defStr(v types.String, def string) string {
@@ -204,6 +212,7 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		Enabled:         plan.Enabled.IsNull() || plan.Enabled.ValueBool(),
 		IsDefault:       plan.IsDefault.ValueBool(),
 		PriceRegion:     ptrIf(plan.PriceRegion),
+		ManagedBy:       ptrIf(plan.ManagedBy),
 	}
 	var out modelAPI
 	if err := r.client.do(ctx, "POST", "/api/v1/admin/models", nil, body, &out); err != nil {
@@ -259,6 +268,7 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		Enabled:         &enabled,
 		IsDefault:       &isDefault,
 		PriceRegion:     ptrIf(plan.PriceRegion),
+		ManagedBy:       ptrIf(plan.ManagedBy),
 	}
 	var out modelAPI
 	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+plan.ModelID.ValueString(), nil, body, &out); err != nil {
@@ -305,5 +315,11 @@ func (r *modelResource) apply(m *modelResourceModel, a *modelAPI) {
 	// "inconsistent result" errors when unset.
 	if a.PriceRegion != nil && *a.PriceRegion != "" {
 		m.PriceRegion = types.StringValue(*a.PriceRegion)
+	}
+	// managed_by is Optional (not Computed): only reflect a server value when the
+	// response carries one, otherwise keep the planned/null value to avoid
+	// "inconsistent result" errors when unset. No else StringNull() here.
+	if a.ManagedBy != "" {
+		m.ManagedBy = types.StringValue(a.ManagedBy)
 	}
 }

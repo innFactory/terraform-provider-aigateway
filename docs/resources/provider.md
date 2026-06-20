@@ -38,6 +38,7 @@ resource "aigateway_provider" "azure" {
 - `auth_type` (String) Authentication type (apiKey | managedIdentity | none). Defaults to apiKey.
 - `credential` (String, Sensitive) Raw upstream API key / secret. Stored in the gateway credential store; never read back.
 - `enabled` (Boolean) Whether the provider is enabled. Defaults to true.
+- `managed_by` (String) Free-form marker stored on the gateway object (e.g. companygpt-terraform) so the UI can flag IaC-managed providers/models.
 - `project_id` (String) GCP project id (Vertex AI).
 - `region` (String) Region (Vertex AI, AWS Bedrock).
 
