@@ -38,3 +38,20 @@ func TestModelApplyLeavesUnsetManagedByNull(t *testing.T) {
 		t.Errorf("managed_by should stay null when unset and gateway returns none, got %q", m.ManagedBy.ValueString())
 	}
 }
+
+// enabled/is_default are Optional+Computed → unset plans as UNKNOWN, not null.
+// defBool must return the default in BOTH cases so models aren't created disabled.
+func TestDefBoolDefaultsOnNullAndUnknown(t *testing.T) {
+	if got := defBool(types.BoolNull(), true); got != true {
+		t.Errorf("null => default true, got %v", got)
+	}
+	if got := defBool(types.BoolUnknown(), true); got != true {
+		t.Errorf("unknown => default true, got %v", got)
+	}
+	if got := defBool(types.BoolValue(false), true); got != false {
+		t.Errorf("explicit false must win over default true, got %v", got)
+	}
+	if got := defBool(types.BoolNull(), false); got != false {
+		t.Errorf("null => default false, got %v", got)
+	}
+}
