@@ -191,6 +191,17 @@ func defStr(v types.String, def string) string {
 	return def
 }
 
+// defBool returns def when v is unset — i.e. null OR unknown. enabled/is_default
+// are Optional+Computed, so an unset config value plans as UNKNOWN (not null);
+// checking only IsNull would yield false here and ValueBool() would return the
+// zero value, which silently created models disabled.
+func defBool(v types.Bool, def bool) bool {
+	if v.IsNull() || v.IsUnknown() {
+		return def
+	}
+	return v.ValueBool()
+}
+
 func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan modelResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -209,8 +220,8 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		InputMicros:     plan.InputMicros.ValueInt64(),
 		OutputMicros:    plan.OutputMicros.ValueInt64(),
 		CachedMicros:    plan.CachedMicros.ValueInt64(),
-		Enabled:         plan.Enabled.IsNull() || plan.Enabled.ValueBool(),
-		IsDefault:       plan.IsDefault.ValueBool(),
+		Enabled:         defBool(plan.Enabled, true),
+		IsDefault:       defBool(plan.IsDefault, false),
 		PriceRegion:     ptrIf(plan.PriceRegion),
 		ManagedBy:       ptrIf(plan.ManagedBy),
 	}
@@ -255,8 +266,8 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	in := plan.InputMicros.ValueInt64()
 	out64 := plan.OutputMicros.ValueInt64()
 	cached := plan.CachedMicros.ValueInt64()
-	enabled := plan.Enabled.ValueBool()
-	isDefault := plan.IsDefault.ValueBool()
+	enabled := defBool(plan.Enabled, true)
+	isDefault := defBool(plan.IsDefault, false)
 	body := modelUpdateBody{
 		DisplayName:     &dn,
 		ProviderID:      &pid,
