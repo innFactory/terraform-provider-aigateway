@@ -81,6 +81,52 @@ provider drives the live API). For an in-cluster/HTTP endpoint set
 | `aigateway_tenant_settings` | default allowed models + org budget (unlimited) | singleton |
 | `aigateway_deployment_group` | load-balance one model across many provider deployments (multi-region/provider) with strategy + retry + cooldown | per `model_id` |
 | `aigateway_fallback_chain` | ordered fallback models tried after a model's deployments are exhausted | per `model_id` |
+| `aigateway_companygpt_integration` | the companyGPT integration policy: enables the trusted-header + direct-OIDC integration and maps Entra groups → gateway role / model allowlist | per `tenant_id` |
+
+### `aigateway_companygpt_integration`
+
+Manages the per-tenant **companyGPT integration policy** that turns on the
+companyGPT/LibreChat integration and wires **Entra-group RBAC**. It writes to a
+single **PUT-only** admin endpoint
+(`PUT /api/v1/admin/tenant/{id}/companygpt-integration`, OwnerOnly), so the
+resource is **write-mostly**: Create/Update both PUT the full policy and
+`Delete` **deactivates** the integration (`enabled = false`) rather than
+removing tenant data.
+
+```hcl
+resource "aigateway_companygpt_integration" "this" {
+  tenant_id              = "default"
+  enabled                = true
+  allow_unbudgeted_users = true   # auto-provision all authenticated users
+  # external_tenant_ids  = [...]  # omit to accept any external tenant
+
+  # Coarse role-string → gateway role (capped to member/guest).
+  role_mappings = [
+    { external_role = "admin", gateway_role = "member" },
+  ]
+
+  # Entra group → gateway role + optional model allowlist. Group object ids MAY
+  # grant admin/owner (pinned to explicit ids). Empty allowed_models = all.
+  group_mappings = [
+    { external_group_id = var.admin_group_id, gateway_role = "owner" },
+    { external_group_id = var.user_group_id,  gateway_role = "member" },
+  ]
+
+  managed_by = "companygpt-terraform"
+}
+```
+
+Key attributes:
+
+| Attribute | Description |
+|---|---|
+| `tenant_id` | tenant the policy applies to (e.g. `default`) |
+| `enabled` | turns the integration on; `Delete` sets this `false` |
+| `allow_unbudgeted_users` | auto-provision authenticated users without a budget |
+| `external_tenant_ids` | external (LibreChat) tenant ids to accept; omit for any |
+| `role_mappings` | coarse role-string → gateway role (capped to member/guest) |
+| `group_mappings` | Entra group → `gateway_role` (+ optional `allowed_models`); group ids may grant admin/owner |
+| `managed_by` | free-form owner tag (e.g. `companygpt-terraform`) |
 
 ## Data sources
 

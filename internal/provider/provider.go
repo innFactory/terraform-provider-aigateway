@@ -117,6 +117,7 @@ func (p *aigatewayProvider) Resources(_ context.Context) []func() resource.Resou
 		newTenantSettingsResource,
 		newDeploymentGroupResource,
 		newFallbackChainResource,
+		newCompanygptIntegrationResource,
 	}
 }
 
