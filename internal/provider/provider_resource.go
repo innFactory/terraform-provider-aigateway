@@ -251,7 +251,13 @@ func (r *providerResource) apply(m *providerResourceModel, a *providerAPI) {
 	if a.ProjectID != "" {
 		m.ProjectID = types.StringValue(a.ProjectID)
 	}
+	// api_version is Optional+Computed: when unset in config (every non-Azure
+	// provider) its planned value is unknown, so we MUST write a known value
+	// here or Terraform rejects the result ("unknown value ... after apply").
+	// Azure sets it and the gateway echoes it; everyone else gets null.
 	if a.APIVersion != "" {
 		m.APIVersion = types.StringValue(a.APIVersion)
+	} else {
+		m.APIVersion = types.StringNull()
 	}
 }
