@@ -102,7 +102,7 @@ resource "aigateway_companygpt_integration" "this" {
 
   # Coarse role-string → gateway role (capped to member/guest).
   role_mappings = [
-    { role = "admin", gateway_role = "member" },
+    { external_role = "admin", gateway_role = "member" },
   ]
 
   # Entra group → gateway role + optional model allowlist. Group object ids MAY
