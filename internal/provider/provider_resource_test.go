@@ -59,3 +59,36 @@ func TestProviderApplyPreservesAzureAPIVersion(t *testing.T) {
 		t.Errorf("azure api_version must round-trip, got %q", m.APIVersion.ValueString())
 	}
 }
+
+// managed_by is Optional (NOT Computed). When the config sets it and the gateway
+// echoes it back, apply() must preserve the value exactly.
+func TestProviderApplyPreservesManagedBy(t *testing.T) {
+	r := &providerResource{}
+	m := &providerResourceModel{ManagedBy: types.StringValue("companygpt-terraform")}
+	a := &providerAPI{ID: "provider_x", ManagedBy: "companygpt-terraform", Enabled: true}
+
+	r.apply(m, a)
+
+	if m.ManagedBy.ValueString() != "companygpt-terraform" {
+		t.Errorf("managed_by must round-trip, got %q", m.ManagedBy.ValueString())
+	}
+}
+
+// managed_by is Optional-only: when unset in config its planned value is null
+// (known, not unknown). The gateway returns an empty string. apply() must leave
+// the model value untouched (null) and must NOT force it to unknown — otherwise
+// we'd reproduce the api_version inconsistency bug class.
+func TestProviderApplyLeavesUnsetManagedByNull(t *testing.T) {
+	r := &providerResource{}
+	m := &providerResourceModel{ManagedBy: types.StringNull()} // unset in config => null plan value
+	a := &providerAPI{ID: "provider_x", ManagedBy: "", Enabled: true}
+
+	r.apply(m, a)
+
+	if m.ManagedBy.IsUnknown() {
+		t.Fatal("managed_by must not become unknown after apply")
+	}
+	if !m.ManagedBy.IsNull() {
+		t.Errorf("managed_by should stay null when unset and gateway returns none, got %q", m.ManagedBy.ValueString())
+	}
+}

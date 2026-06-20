@@ -36,6 +36,7 @@ type providerResourceModel struct {
 	ProjectID  types.String `tfsdk:"project_id"`
 	APIVersion types.String `tfsdk:"api_version"`
 	Enabled    types.Bool   `tfsdk:"enabled"`
+	ManagedBy  types.String `tfsdk:"managed_by"`
 }
 
 func (r *providerResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -87,6 +88,10 @@ func (r *providerResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Computed:    true,
 				Description: "API version (Azure OpenAI).",
 			},
+			"managed_by": schema.StringAttribute{
+				Optional:    true,
+				Description: "Free-form marker stored on the gateway object (e.g. companygpt-terraform) so the UI can flag IaC-managed providers/models.",
+			},
 			"enabled": schema.BoolAttribute{
 				Optional:    true,
 				Computed:    true,
@@ -112,6 +117,7 @@ type providerCreateBody struct {
 	Region     *string `json:"region,omitempty"`
 	ProjectID  *string `json:"projectId,omitempty"`
 	APIVersion *string `json:"apiVersion,omitempty"`
+	ManagedBy  *string `json:"managedBy,omitempty"`
 }
 
 type providerUpdateBody struct {
@@ -121,6 +127,7 @@ type providerUpdateBody struct {
 	Region     *string `json:"region,omitempty"`
 	ProjectID  *string `json:"projectId,omitempty"`
 	APIVersion *string `json:"apiVersion,omitempty"`
+	ManagedBy  *string `json:"managedBy,omitempty"`
 	Enabled    *bool   `json:"enabled,omitempty"`
 }
 
@@ -133,6 +140,7 @@ type providerAPI struct {
 	Region     string `json:"region"`
 	ProjectID  string `json:"projectId"`
 	APIVersion string `json:"apiVersion"`
+	ManagedBy  string `json:"managedBy"`
 	Enabled    bool   `json:"enabled"`
 }
 
@@ -163,6 +171,7 @@ func (r *providerResource) Create(ctx context.Context, req resource.CreateReques
 		Region:     ptrIf(plan.Region),
 		ProjectID:  ptrIf(plan.ProjectID),
 		APIVersion: ptrIf(plan.APIVersion),
+		ManagedBy:  ptrIf(plan.ManagedBy),
 	}
 	var out providerAPI
 	if err := r.client.do(ctx, "POST", "/api/v1/admin/providers", nil, body, &out); err != nil {
@@ -210,6 +219,7 @@ func (r *providerResource) Update(ctx context.Context, req resource.UpdateReques
 		Region:     ptrIf(plan.Region),
 		ProjectID:  ptrIf(plan.ProjectID),
 		APIVersion: ptrIf(plan.APIVersion),
+		ManagedBy:  ptrIf(plan.ManagedBy),
 		Enabled:    &enabled,
 	}
 	var out providerAPI
@@ -250,6 +260,12 @@ func (r *providerResource) apply(m *providerResourceModel, a *providerAPI) {
 	}
 	if a.ProjectID != "" {
 		m.ProjectID = types.StringValue(a.ProjectID)
+	}
+	// managed_by is Optional (not Computed): only reflect a server value when the
+	// response carries one, otherwise keep the planned/null value to avoid
+	// "inconsistent result" errors when unset. No else StringNull() here.
+	if a.ManagedBy != "" {
+		m.ManagedBy = types.StringValue(a.ManagedBy)
 	}
 	// api_version is Optional+Computed: when unset in config (every non-Azure
 	// provider) its planned value is unknown, so we MUST write a known value

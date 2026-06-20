@@ -41,6 +41,7 @@ resource "aigateway_model" "gpt_5_4_mini" {
 - `enabled` (Boolean) Whether the model is enabled. Defaults to true.
 - `input_per_1m_tokens_microdollars` (Number) Input token price per 1M tokens in microdollars.
 - `is_default` (Boolean) Whether this is the tenant default model.
+- `managed_by` (String) Free-form marker stored on the gateway object (e.g. companygpt-terraform) so the UI can flag IaC-managed providers/models.
 - `model_type` (String) chat | embedding | image | audio. Defaults to chat.
 - `output_per_1m_tokens_microdollars` (Number) Output token price per 1M tokens in microdollars.
 
