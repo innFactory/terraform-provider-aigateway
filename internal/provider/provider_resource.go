@@ -6,6 +6,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -69,6 +70,11 @@ func (r *providerResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Optional:    true,
 				Computed:    true,
 				Description: "Authentication type (apiKey | managedIdentity | none). Defaults to apiKey.",
+				// Optional+Computed: when the config omits it, keep the prior
+				// state value instead of planning "unknown". Without this the
+				// planned value goes unknown on any in-place update and is sent
+				// as "" (the zero value), clobbering the server default.
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"credential": schema.StringAttribute{
 				Optional:    true,
@@ -84,9 +90,10 @@ func (r *providerResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Description: "GCP project id (Vertex AI).",
 			},
 			"api_version": schema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "API version (Azure OpenAI).",
+				Optional:      true,
+				Computed:      true,
+				Description:   "API version (Azure OpenAI).",
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"managed_by": schema.StringAttribute{
 				Optional:    true,
@@ -96,6 +103,12 @@ func (r *providerResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Optional:    true,
 				Computed:    true,
 				Description: "Whether the provider is enabled. Defaults to true.",
+				// CRITICAL: without UseStateForUnknown, an in-place update of any
+				// other attribute (e.g. api_version) plans `enabled` as unknown,
+				// so Update sends enabled=false (the bool zero value) and silently
+				// DISABLES the provider. Keeping the prior state value prevents
+				// that — a provider stays enabled across unrelated updates.
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 		},
 	}

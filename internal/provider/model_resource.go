@@ -6,6 +6,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -72,40 +74,53 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Optional:    true,
 				Description: "Azure deployment name (required for azure_openai).",
 			},
+			// All of the following are Optional+Computed. UseStateForUnknown keeps
+			// the prior state value when the config omits the attribute, instead
+			// of planning "unknown" — which on an in-place update would be sent
+			// as the zero value ("" / 0 / false), clobbering server-managed data.
+			// Without it, e.g. editing display_name would zero the gateway-fetched
+			// pricing, blank the capability, or disable the model.
 			"capability": schema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "chat | embedding | image | audio. Defaults to chat.",
+				Optional:      true,
+				Computed:      true,
+				Description:   "chat | embedding | image | audio. Defaults to chat.",
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"model_type": schema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "chat | embedding | image | audio. Defaults to chat.",
+				Optional:      true,
+				Computed:      true,
+				Description:   "chat | embedding | image | audio. Defaults to chat.",
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"input_per_1m_tokens_microdollars": schema.Int64Attribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "Input token price per 1M tokens in microdollars.",
+				Optional:      true,
+				Computed:      true,
+				Description:   "Input token price per 1M tokens in microdollars.",
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 			"output_per_1m_tokens_microdollars": schema.Int64Attribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "Output token price per 1M tokens in microdollars.",
+				Optional:      true,
+				Computed:      true,
+				Description:   "Output token price per 1M tokens in microdollars.",
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 			"cached_input_per_1m_tokens_microdollars": schema.Int64Attribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "Cached input token price per 1M tokens in microdollars.",
+				Optional:      true,
+				Computed:      true,
+				Description:   "Cached input token price per 1M tokens in microdollars.",
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 			"enabled": schema.BoolAttribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "Whether the model is enabled. Defaults to true.",
+				Optional:      true,
+				Computed:      true,
+				Description:   "Whether the model is enabled. Defaults to true.",
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"is_default": schema.BoolAttribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "Whether this is the tenant default model.",
+				Optional:      true,
+				Computed:      true,
+				Description:   "Whether this is the tenant default model.",
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"price_region": schema.StringAttribute{
 				Optional: true,
