@@ -6,6 +6,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -75,9 +77,10 @@ func (r *deploymentGroupResource) Schema(_ context.Context, _ resource.SchemaReq
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"strategy": schema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "Load-balancer strategy: round_robin | weighted_random | latency_based | least_busy. Defaults to round_robin.",
+				Optional:      true,
+				Computed:      true,
+				Description:   "Load-balancer strategy: round_robin | weighted_random | latency_based | least_busy. Defaults to round_robin.",
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"deployments": schema.ListNestedAttribute{
 				Required:    true,
@@ -97,19 +100,22 @@ func (r *deploymentGroupResource) Schema(_ context.Context, _ resource.SchemaReq
 							Description: "Azure deployment name (azure_openai).",
 						},
 						"weight": schema.Int64Attribute{
-							Optional:    true,
-							Computed:    true,
-							Description: "Traffic weight (1-100, higher = more traffic). Defaults to 100.",
+							Optional:      true,
+							Computed:      true,
+							Description:   "Traffic weight (1-100, higher = more traffic). Defaults to 100.",
+							PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 						},
 						"priority": schema.Int64Attribute{
-							Optional:    true,
-							Computed:    true,
-							Description: "Priority tier (0 = highest). Lower tiers used only when higher are exhausted.",
+							Optional:      true,
+							Computed:      true,
+							Description:   "Priority tier (0 = highest). Lower tiers used only when higher are exhausted.",
+							PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 						},
 						"enabled": schema.BoolAttribute{
-							Optional:    true,
-							Computed:    true,
-							Description: "Whether this deployment is enabled. Defaults to true.",
+							Optional:      true,
+							Computed:      true,
+							Description:   "Whether this deployment is enabled. Defaults to true.",
+							PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 						},
 						"timeout_seconds": schema.Int64Attribute{
 							Optional:    true,

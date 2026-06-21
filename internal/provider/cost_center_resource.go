@@ -52,9 +52,10 @@ func (r *costCenterResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				Description: "Cost center (budget) name, unique per tenant.",
 			},
 			"currency": schema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "ISO 4217 currency code. Defaults to USD.",
+				Optional:      true,
+				Computed:      true,
+				Description:   "ISO 4217 currency code. Defaults to USD.",
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"description": schema.StringAttribute{
 				Optional:    true,
