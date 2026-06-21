@@ -33,6 +33,15 @@ func strOrNull(s string) types.String {
 	return types.StringValue(s)
 }
 
+// strPtr returns a pointer to the string value, or nil when null/unknown.
+func strPtr(s types.String) *string {
+	if s.IsNull() || s.IsUnknown() {
+		return nil
+	}
+	v := s.ValueString()
+	return &v
+}
+
 // int64Ptr returns a pointer to the int64 value, or nil when null/unknown.
 func int64Ptr(v types.Int64) *int64 {
 	if v.IsNull() || v.IsUnknown() {

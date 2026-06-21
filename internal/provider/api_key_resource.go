@@ -32,6 +32,7 @@ type apiKeyResourceModel struct {
 	AllowedModels    types.List   `tfsdk:"allowed_models"`
 	AllowedProviders types.List   `tfsdk:"allowed_providers"`
 	RateLimitRPM     types.Int64  `tfsdk:"rate_limit_rpm"`
+	CostCenterID     types.String `tfsdk:"cost_center_id"`
 	Key              types.String `tfsdk:"key"`
 	KeyPrefix        types.String `tfsdk:"key_prefix"`
 	Status           types.String `tfsdk:"status"`
@@ -72,6 +73,10 @@ func (r *apiKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Optional:    true,
 				Description: "Requests-per-minute limit for the key.",
 			},
+			"cost_center_id": schema.StringAttribute{
+				Optional:    true,
+				Description: "Cost center (budget) id this key's usage is attributed to. References an aigateway_cost_center id.",
+			},
 			"key": schema.StringAttribute{
 				Computed:      true,
 				Sensitive:     true,
@@ -103,6 +108,7 @@ type apiKeyCreateBody struct {
 	AllowedModels    []string `json:"allowedModels,omitempty"`
 	AllowedProviders []string `json:"allowedProviders,omitempty"`
 	RateLimitRPM     *int64   `json:"rateLimitRpm,omitempty"`
+	CostCenterID     *string  `json:"costCenterId,omitempty"`
 }
 
 type apiKeyCreateResponse struct {
@@ -122,6 +128,7 @@ type apiKeyListEntry struct {
 	AllowedProviders []string `json:"allowedProviders"`
 	BudgetMicros     *int64   `json:"budgetMicrodollars"`
 	RateLimitRPM     *int64   `json:"rateLimitRpm"`
+	BudgetID         *string  `json:"budgetId"`
 }
 
 func listOrNil(ctx context.Context, l types.List) []string {
@@ -145,6 +152,7 @@ func (r *apiKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 		AllowedModels:    listOrNil(ctx, plan.AllowedModels),
 		AllowedProviders: listOrNil(ctx, plan.AllowedProviders),
 		RateLimitRPM:     int64Ptr(plan.RateLimitRPM),
+		CostCenterID:     strPtr(plan.CostCenterID),
 	}
 	var out apiKeyCreateResponse
 	if err := r.client.do(ctx, "POST", "/api/v1/admin/keys", nil, body, &out); err != nil {
@@ -194,6 +202,11 @@ func (r *apiKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 		if len(k.AllowedProviders) > 0 {
 			state.AllowedProviders = strList(ctx, &resp.Diagnostics, k.AllowedProviders)
 		}
+		// Only reflect a server-side cost center when present; when absent leave
+		// the configured value untouched to avoid a perpetual diff.
+		if k.BudgetID != nil && *k.BudgetID != "" {
+			state.CostCenterID = types.StringValue(*k.BudgetID)
+		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 		return
 	}
@@ -206,6 +219,7 @@ type apiKeyUpdateBody struct {
 	AllowedModels    []string `json:"allowedModels,omitempty"`
 	AllowedProviders []string `json:"allowedProviders,omitempty"`
 	RateLimitRPM     *int64   `json:"rateLimitRpm,omitempty"`
+	CostCenterID     *string  `json:"costCenterId,omitempty"`
 }
 
 func (r *apiKeyResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -222,6 +236,7 @@ func (r *apiKeyResource) Update(ctx context.Context, req resource.UpdateRequest,
 		AllowedModels:    listOrNil(ctx, plan.AllowedModels),
 		AllowedProviders: listOrNil(ctx, plan.AllowedProviders),
 		RateLimitRPM:     int64Ptr(plan.RateLimitRPM),
+		CostCenterID:     strPtr(plan.CostCenterID),
 	}
 	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/keys/"+state.ID.ValueString(), nil, body, nil); err != nil {
 		resp.Diagnostics.AddError("Update API key failed", err.Error())
