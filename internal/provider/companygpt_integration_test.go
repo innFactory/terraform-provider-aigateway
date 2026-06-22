@@ -51,6 +51,29 @@ func TestCompanygptIntegrationBodyMarshalsCamelCaseAndOmitsUnset(t *testing.T) {
 	}
 }
 
+func TestCompanygptIntegrationGroupMappingAllowedProviders(t *testing.T) {
+	ctx := context.Background()
+	m := companygptIntegrationResourceModel{
+		TenantID: types.StringValue("default"),
+		Enabled:  types.BoolValue(true),
+		GroupMappings: []groupMappingModel{{
+			ExternalGroupID:  types.StringValue("grp-no-anthropic"),
+			AllowedModels:    strListVal([]string{"gpt-5.4"}),
+			AllowedProviders: strListVal([]string{"provider_openai"}),
+		}},
+		ManagedBy:       types.StringNull(),
+		ManagedRevision: types.StringNull(),
+	}
+	raw, err := json.Marshal(m.toBody(ctx))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"enabled":true,"groupMappings":[{"externalGroupId":"grp-no-anthropic","allowedModels":["gpt-5.4"],"allowedProviders":["provider_openai"]}],"metadata":{"managedBy":"companygpt-terraform"}}`
+	if string(raw) != want {
+		t.Errorf("toBody()=%s\nwant %s", raw, want)
+	}
+}
+
 func TestCompanygptIntegrationDisabledBody(t *testing.T) {
 	body := upsertIntegrationPolicyBody{
 		Enabled:  false,
