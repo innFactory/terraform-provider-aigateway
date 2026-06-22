@@ -99,15 +99,15 @@ func (r *costCenterResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			},
 			"monthly_cap": schema.StringAttribute{
 				Optional:    true,
-				Description: "Monthly cap as a decimal string (e.g. \"500.00\"); omit for unlimited (attribution-only).",
+				Description: "Monthly cap as a decimal string (e.g. \"500.00\"); omit for unlimited (attribution-only). On update, leaving this unset in config sends null, which CLEARS any cap set outside Terraform (Terraform owns the cap).",
 			},
 			"weekly_cap": schema.StringAttribute{
 				Optional:    true,
-				Description: "Weekly cap as a decimal string. \"0\" blocks, a positive number caps, omit/null = unlimited (clearable). Must satisfy daily <= weekly <= monthly when set.",
+				Description: "Weekly cap as a decimal string. \"0\" blocks, a positive number caps, omit/null = unlimited (clearable). Must satisfy daily <= weekly <= monthly when set. On update, leaving this unset in config sends null, which CLEARS any cap set outside Terraform (Terraform owns the cap).",
 			},
 			"daily_cap": schema.StringAttribute{
 				Optional:    true,
-				Description: "Daily cap as a decimal string. \"0\" blocks, a positive number caps, omit/null = unlimited (clearable).",
+				Description: "Daily cap as a decimal string. \"0\" blocks, a positive number caps, omit/null = unlimited (clearable). On update, leaving this unset in config sends null, which CLEARS any cap set outside Terraform (Terraform owns the cap).",
 			},
 			"auto_add_new_users": schema.BoolAttribute{
 				Optional:    true,
@@ -124,7 +124,7 @@ func (r *costCenterResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			},
 			"sub_limits": schema.ListNestedAttribute{
 				Optional:    true,
-				Description: "Fine-grained caps within this budget, scoped to a provider/model/alias/router. Reconciled against the gateway sub-limit sub-resources on every apply.",
+				Description: "Fine-grained caps within this budget, scoped to a provider/model/alias/router. Server sub-limits are reflected into state on Read, so out-of-band changes surface as drift in `terraform plan` and are self-healed (reverted to the Terraform-desired config) on the next apply.",
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"scope_type": schema.StringAttribute{
@@ -391,6 +391,12 @@ func (r *costCenterResource) Read(ctx context.Context, req resource.ReadRequest,
 		return
 	}
 	r.apply(&state, &out, optString(state.Currency))
+	// Reflect server sub-limits into state so out-of-band changes surface as
+	// drift in `terraform plan`. reconcileSubLimits on apply will self-heal any
+	// drift back to the desired configuration.
+	if out.SubLimits != nil {
+		state.SubLimits = subLimitsFromAPI(out.SubLimits)
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 
@@ -437,6 +443,37 @@ func (r *costCenterResource) Delete(ctx context.Context, req resource.DeleteRequ
 
 func (r *costCenterResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
+}
+
+// subLimitsFromAPI converts the server sub-limit list to the model slice used
+// for state. The mapping is scope-driven: alias scopes populate alias_name;
+// all others populate scope_id from their respective typed field.
+func subLimitsFromAPI(apiList []subLimitAPI) []subLimitModel {
+	out := make([]subLimitModel, 0, len(apiList))
+	for _, a := range apiList {
+		m := subLimitModel{
+			ScopeType: types.StringValue(a.Scope.Type),
+			CapAmount: types.StringValue(a.CapAmount),
+		}
+		switch a.Scope.Type {
+		case "alias":
+			m.AliasName = types.StringValue(a.Scope.AliasName)
+		case "model":
+			m.ScopeID = types.StringValue(a.Scope.ModelID)
+		case "router":
+			m.ScopeID = types.StringValue(a.Scope.RouterID)
+		default: // provider
+			m.ScopeID = types.StringValue(a.Scope.ProviderID)
+		}
+		if a.DailyCap != nil {
+			m.DailyCap = types.StringValue(*a.DailyCap)
+		}
+		if a.WeeklyCap != nil {
+			m.WeeklyCap = types.StringValue(*a.WeeklyCap)
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // apply copies API fields into the model. currencyFallback resolves the

@@ -102,14 +102,17 @@ func (r *tenantSettingsResource) Configure(_ context.Context, req resource.Confi
 
 // tenantPatchBody always transmits the managed scalar fields. The gateway
 // interprets orgBudgetLimitMicrodollars == 0 as "unlimited" (clears the cap);
-// a positive value sets the cap. defaultUserBudgetMicrodollars follows the same
-// convention (0 = unlimited). managedRevision is the last-writer-wins arbiter:
-// the gateway only applies this write when the revision is >= the stored one.
+// a positive value sets the cap. defaultUserBudgetMicrodollars is a
+// double-option field: null clears the cap (unlimited); a positive int64 sets
+// it. 0 would mean "block all users", so we must NOT use 0 as the clear
+// sentinel — use nil (→ JSON null) instead. managedRevision is the
+// last-writer-wins arbiter: the gateway only applies this write when the
+// revision is >= the stored one.
 type tenantPatchBody struct {
 	DefaultAllowedModels    []string `json:"defaultAllowedModels"`
 	OrgBudgetMicros         int64    `json:"orgBudgetLimitMicrodollars"`
 	Currency                string   `json:"currency,omitempty"`
-	DefaultUserBudgetMicros int64    `json:"defaultUserBudgetMicrodollars"`
+	DefaultUserBudgetMicros *int64   `json:"defaultUserBudgetMicrodollars"`
 	DefaultCostCenterID     string   `json:"defaultCostCenterId,omitempty"`
 	ManagedRevision         string   `json:"managedRevision,omitempty"`
 }
@@ -138,9 +141,10 @@ func (r *tenantSettingsResource) write(ctx context.Context, plan *tenantSettings
 		body.OrgBudgetMicros = plan.OrgBudgetMicros.ValueInt64()
 	}
 	if plan.DefaultUserBudgetUnlimited.ValueBool() {
-		body.DefaultUserBudgetMicros = 0 // 0 → unlimited
+		body.DefaultUserBudgetMicros = nil // nil → JSON null → gateway clears the per-user cap
 	} else {
-		body.DefaultUserBudgetMicros = plan.DefaultUserBudgetMicros.ValueInt64()
+		v := plan.DefaultUserBudgetMicros.ValueInt64()
+		body.DefaultUserBudgetMicros = &v
 	}
 	// Persist the revision we stamped so it round-trips into state.
 	plan.ManagedRevision = types.StringValue(body.ManagedRevision)

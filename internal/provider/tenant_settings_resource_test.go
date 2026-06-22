@@ -8,14 +8,16 @@ import (
 )
 
 // The PATCH body must carry currency, user-max, default cost center and a
-// managed revision. User-max unlimited sends 0 (the gateway clears the cap),
-// matching the org-budget-unlimited convention already in this resource.
+// managed revision. User-max unlimited sends null (the gateway double-option
+// clears the per-user cap); a set user-max sends the microdollar value.
+// Org-budget unlimited sends 0 (the gateway 0-sentinel convention).
 func TestTenantPatchBodyMarshalsFull(t *testing.T) {
+	userBudget := int64(50000000)
 	body := tenantPatchBody{
 		DefaultAllowedModels:    []string{"gpt-5.4"},
 		OrgBudgetMicros:         0,
 		Currency:                "EUR",
-		DefaultUserBudgetMicros: 50000000,
+		DefaultUserBudgetMicros: &userBudget,
 		DefaultCostCenterID:     "budget_companygpt",
 		ManagedRevision:         "2026-06-21T10:00:00Z",
 	}
@@ -25,6 +27,29 @@ func TestTenantPatchBodyMarshalsFull(t *testing.T) {
 	}
 	got := string(raw)
 	want := `{"defaultAllowedModels":["gpt-5.4"],"orgBudgetLimitMicrodollars":0,"currency":"EUR","defaultUserBudgetMicrodollars":50000000,"defaultCostCenterId":"budget_companygpt","managedRevision":"2026-06-21T10:00:00Z"}`
+	if got != want {
+		t.Errorf("patch body mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestTenantPatchBodyUserUnlimitedSerialisesNull verifies that setting
+// default_user_budget_unlimited=true emits "defaultUserBudgetMicrodollars":null
+// (not 0). The gateway's double-option field treats null as "clear the cap";
+// sending 0 would BLOCK all users (a zero-dollar per-user cap).
+func TestTenantPatchBodyUserUnlimitedSerialisesNull(t *testing.T) {
+	body := tenantPatchBody{
+		DefaultAllowedModels:    []string{"gpt-4o"},
+		OrgBudgetMicros:         0,
+		Currency:                "USD",
+		DefaultUserBudgetMicros: nil, // unlimited: nil → JSON null
+		ManagedRevision:         "2026-06-21T10:00:00Z",
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	want := `{"defaultAllowedModels":["gpt-4o"],"orgBudgetLimitMicrodollars":0,"currency":"USD","defaultUserBudgetMicrodollars":null,"managedRevision":"2026-06-21T10:00:00Z"}`
 	if got != want {
 		t.Errorf("patch body mismatch\n got: %s\nwant: %s", got, want)
 	}
