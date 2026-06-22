@@ -55,12 +55,15 @@ func TestClientMapsErrorStatus(t *testing.T) {
 	}
 }
 
-func TestClientUnlimitedBudgetSerialisesZero(t *testing.T) {
-	// org budget unlimited → orgBudgetLimitMicrodollars must be 0 (the gateway
-	// treats 0 as "clear the cap → unlimited"; null would leave it unchanged).
+func TestClientOrgUnlimitedSerialisesZeroUserUnlimitedSerialisesNull(t *testing.T) {
+	// org budget unlimited → orgBudgetLimitMicrodollars must be 0 (gateway
+	// treats 0 as "clear the org cap → unlimited"; null is not the sentinel here).
+	// user budget unlimited → defaultUserBudgetMicrodollars must be null (gateway
+	// double-option: null clears the cap; 0 would BLOCK all users).
 	body := tenantPatchBody{DefaultAllowedModels: []string{"gpt-4o"}, OrgBudgetMicros: 0}
+	// DefaultUserBudgetMicros left as nil (unlimited path).
 	raw, _ := json.Marshal(body)
-	want := `{"defaultAllowedModels":["gpt-4o"],"orgBudgetLimitMicrodollars":0}`
+	want := `{"defaultAllowedModels":["gpt-4o"],"orgBudgetLimitMicrodollars":0,"defaultUserBudgetMicrodollars":null}`
 	if string(raw) != want {
 		t.Errorf("marshal = %s, want %s", raw, want)
 	}

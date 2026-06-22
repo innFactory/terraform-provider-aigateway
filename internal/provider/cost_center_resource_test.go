@@ -104,3 +104,99 @@ func TestCostCenterApplyLeavesUnsetIsOrgNull(t *testing.T) {
 		t.Errorf("is_org should stay null when unset, got %v", m.IsOrg.ValueBool())
 	}
 }
+
+// Create body marshals all the new budget fields in camelCase, omitting unset
+// optionals; caps are JSON strings; fallbackChain is an array of budget ids.
+func TestCostCenterCreateBodyFullBudget(t *testing.T) {
+	monthly := "500.00"
+	weekly := "200.00"
+	daily := "50.00"
+	mode := "per_user"
+	agent := "agent_42"
+	autoAdd := true
+	body := costCenterCreateBody{
+		Name:            "customer-a",
+		Currency:        "EUR",
+		Mode:            &mode,
+		MonthlyCap:      &monthly,
+		WeeklyCap:       &weekly,
+		DailyCap:        &daily,
+		AgentID:         &agent,
+		AutoAddNewUsers: &autoAdd,
+		FallbackChain:   []string{"budget_companygpt"},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	want := `{"name":"customer-a","currency":"EUR","mode":"per_user","monthlyCap":"500.00","weeklyCap":"200.00","dailyCap":"50.00","agentId":"agent_42","autoAddNewUsers":true,"fallbackChain":["budget_companygpt"]}`
+	if got != want {
+		t.Errorf("create body mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// The UPDATE body sends explicit null for a cleared cap (NOT omitempty), so the
+// gateway double-option path clears it. A kept cap is a string; an unset cap in
+// the model produces null too (clear) — Terraform distinguishes "leave" via not
+// diffing, so null here is always "set to this value or clear".
+func TestCostCenterUpdateBodyClearsCapWithNull(t *testing.T) {
+	monthly := "100.00"
+	body := costCenterUpdateBody{
+		Name:       strp("customer-a"),
+		MonthlyCap: &monthly, // set
+		WeeklyCap:  nil,      // cleared → explicit null
+		DailyCap:   nil,      // cleared → explicit null
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	want := `{"name":"customer-a","monthlyCap":"100.00","weeklyCap":null,"dailyCap":null}`
+	if got != want {
+		t.Errorf("update body mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func strp(s string) *string { return &s }
+
+// A sub-limit create body marshals the scope as an internally-tagged object and
+// caps as decimal strings, omitting unset optionals.
+func TestSubLimitCreateBodyScopeTagging(t *testing.T) {
+	cap := "50.00"
+	weekly := "20.00"
+	body := subLimitCreateBody{
+		Scope:     subLimitScopeBody{Type: "provider", ProviderID: "provider_anthropic"},
+		CapAmount: cap,
+		WeeklyCap: &weekly,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	want := `{"scope":{"type":"provider","providerId":"provider_anthropic"},"capAmount":"50.00","weeklyCap":"20.00"}`
+	if got != want {
+		t.Errorf("sub-limit body mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// scopeKey produces a stable identity per sub-limit so reconcile can match
+// desired against current regardless of server-assigned ids.
+func TestSubLimitScopeKey(t *testing.T) {
+	cases := []struct {
+		m    subLimitModel
+		want string
+	}{
+		{subLimitModel{ScopeType: types.StringValue("provider"), ScopeID: types.StringValue("provider_x")}, "provider:provider_x"},
+		{subLimitModel{ScopeType: types.StringValue("model"), ScopeID: types.StringValue("gpt-5.4")}, "model:gpt-5.4"},
+		{subLimitModel{ScopeType: types.StringValue("alias"), AliasName: types.StringValue("smart")}, "alias:smart"},
+		{subLimitModel{ScopeType: types.StringValue("router"), ScopeID: types.StringValue("router_1")}, "router:router_1"},
+	}
+	for _, c := range cases {
+		if got := c.m.scopeKey(); got != c.want {
+			t.Errorf("scopeKey()=%q want %q", got, c.want)
+		}
+	}
+}

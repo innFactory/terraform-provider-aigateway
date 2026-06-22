@@ -52,6 +52,7 @@ type roleMappingModel struct {
 	ExternalRole             types.String `tfsdk:"external_role"`
 	GatewayRole              types.String `tfsdk:"gateway_role"`
 	AllowedModels            types.List   `tfsdk:"allowed_models"`
+	AllowedProviders         types.List   `tfsdk:"allowed_providers"`
 	UserBudgetMicrodollars   types.Int64  `tfsdk:"user_budget_microdollars"`
 	SharedBudgetID           types.String `tfsdk:"shared_budget_id"`
 	PerUserLimitMicrodollars types.Int64  `tfsdk:"per_user_limit_microdollars"`
@@ -62,6 +63,7 @@ type groupMappingModel struct {
 	ExternalGroupID          types.String `tfsdk:"external_group_id"`
 	GatewayRole              types.String `tfsdk:"gateway_role"`
 	AllowedModels            types.List   `tfsdk:"allowed_models"`
+	AllowedProviders         types.List   `tfsdk:"allowed_providers"`
 	TeamID                   types.String `tfsdk:"team_id"`
 	UserBudgetMicrodollars   types.Int64  `tfsdk:"user_budget_microdollars"`
 	SharedBudgetID           types.String `tfsdk:"shared_budget_id"`
@@ -136,6 +138,11 @@ func (r *companygptIntegrationResource) Schema(_ context.Context, _ resource.Sch
 							ElementType: types.StringType,
 							Description: "Models allowed for users matched by this role.",
 						},
+						"allowed_providers": schema.ListAttribute{
+							Optional:    true,
+							ElementType: types.StringType,
+							Description: "Provider ids allowed for users matched by this role. Empty = no provider restriction from this mapping.",
+						},
 						"user_budget_microdollars": schema.Int64Attribute{
 							Optional:    true,
 							Description: "Per-user budget in microdollars for this role.",
@@ -172,6 +179,11 @@ func (r *companygptIntegrationResource) Schema(_ context.Context, _ resource.Sch
 							Optional:    true,
 							ElementType: types.StringType,
 							Description: "Models allowed for users matched by this group.",
+						},
+						"allowed_providers": schema.ListAttribute{
+							Optional:    true,
+							ElementType: types.StringType,
+							Description: "Provider ids allowed for users matched by this group (e.g. exclude Anthropic). Empty = no provider restriction from this mapping.",
 						},
 						"team_id": schema.StringAttribute{
 							Optional:    true,
@@ -213,6 +225,7 @@ type roleMappingBody struct {
 	ExternalRole             string   `json:"externalRole"`
 	GatewayRole              *string  `json:"gatewayRole,omitempty"`
 	AllowedModels            []string `json:"allowedModels,omitempty"`
+	AllowedProviders         []string `json:"allowedProviders,omitempty"`
 	UserBudgetMicrodollars   *int64   `json:"userBudgetMicrodollars,omitempty"`
 	SharedBudgetID           *string  `json:"sharedBudgetId,omitempty"`
 	PerUserLimitMicrodollars *int64   `json:"perUserLimitMicrodollars,omitempty"`
@@ -223,6 +236,7 @@ type groupMappingBody struct {
 	ExternalGroupID          string   `json:"externalGroupId"`
 	GatewayRole              *string  `json:"gatewayRole,omitempty"`
 	AllowedModels            []string `json:"allowedModels,omitempty"`
+	AllowedProviders         []string `json:"allowedProviders,omitempty"`
 	TeamID                   *string  `json:"teamId,omitempty"`
 	UserBudgetMicrodollars   *int64   `json:"userBudgetMicrodollars,omitempty"`
 	SharedBudgetID           *string  `json:"sharedBudgetId,omitempty"`
@@ -266,6 +280,7 @@ func (m *companygptIntegrationResourceModel) toBody(ctx context.Context) upsertI
 			ExternalRole:             rm.ExternalRole.ValueString(),
 			GatewayRole:              ptrIf(rm.GatewayRole),
 			AllowedModels:            listOrNil(ctx, rm.AllowedModels),
+			AllowedProviders:         listOrNil(ctx, rm.AllowedProviders),
 			UserBudgetMicrodollars:   int64Ptr(rm.UserBudgetMicrodollars),
 			SharedBudgetID:           ptrIf(rm.SharedBudgetID),
 			PerUserLimitMicrodollars: int64Ptr(rm.PerUserLimitMicrodollars),
@@ -278,6 +293,7 @@ func (m *companygptIntegrationResourceModel) toBody(ctx context.Context) upsertI
 			ExternalGroupID:          gm.ExternalGroupID.ValueString(),
 			GatewayRole:              ptrIf(gm.GatewayRole),
 			AllowedModels:            listOrNil(ctx, gm.AllowedModels),
+			AllowedProviders:         listOrNil(ctx, gm.AllowedProviders),
 			TeamID:                   ptrIf(gm.TeamID),
 			UserBudgetMicrodollars:   int64Ptr(gm.UserBudgetMicrodollars),
 			SharedBudgetID:           ptrIf(gm.SharedBudgetID),
