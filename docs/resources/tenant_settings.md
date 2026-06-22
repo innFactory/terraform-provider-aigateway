@@ -8,7 +8,7 @@ description: |-
 
 # aigateway_tenant_settings (Resource)
 
-Singleton tenant-wide settings: default allowed models and the org budget cap.
+Singleton tenant-wide settings: default allowed models, org budget cap, tenant currency, per-user budget max, and default cost center. The currency, per-user max and default cost center fields are **last-writer-wins**: a dashboard edit is not surfaced as drift and will not be reverted by a no-op `terraform apply`.
 
 ## Example Usage
 
@@ -16,6 +16,10 @@ Singleton tenant-wide settings: default allowed models and the org budget cap.
 resource "aigateway_tenant_settings" "this" {
   org_budget_unlimited   = true
   default_allowed_models = ["gpt-5.4-mini", "gpt-5.4", "gemini-3.5-flash", "claude-haiku-4-5"]
+
+  currency                     = "EUR"
+  default_user_budget_unlimited = true
+  default_cost_center_id       = aigateway_cost_center.companygpt.id
 }
 ```
 
@@ -24,7 +28,12 @@ resource "aigateway_tenant_settings" "this" {
 
 ### Optional
 
+- `currency` (String) ISO 4217 tenant currency (e.g. EUR, USD). Last-writer-wins: a dashboard edit is not reverted by a no-op apply.
 - `default_allowed_models` (List of String) Models visible to all users / trusted-header (LibreChat) callers.
+- `default_cost_center_id` (String) Default cost center (budget id) any unscoped key/token attributes to (gate 3 fallback). Empty = unscoped traffic skips gate 3.
+- `default_user_budget_microdollars` (Number) Per-user global monthly cap in microdollars (gate 2). Ignored when default_user_budget_unlimited = true.
+- `default_user_budget_unlimited` (Boolean) When true, the per-user global max is unlimited (gateway clears the cap).
+- `managed_revision` (String) Last-writer-wins revision. The provider stamps a fresh value on every apply; the gateway only accepts a write whose revision is newer than the stored one.
 - `org_budget_limit_microdollars` (Number) Org monthly budget cap in microdollars. Ignored when org_budget_unlimited = true.
 - `org_budget_unlimited` (Boolean) When true, the org budget is set to unlimited (no cap).
 
