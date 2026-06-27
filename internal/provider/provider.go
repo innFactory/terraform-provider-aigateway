@@ -120,6 +120,7 @@ func (p *aigatewayProvider) Resources(_ context.Context) []func() resource.Resou
 		newCompanygptIntegrationResource,
 		newCostCenterResource,
 		newGuardrailResource,
+		newFlowResource,
 	}
 }
 

@@ -28,6 +28,12 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
+// parseRulesJSON is a guardrail-specific alias of the shared parseJSONArray,
+// kept for backward compatibility with existing tests and call sites.
+func parseRulesJSON(s string) ([]any, error) {
+	return parseJSONArray(s)
+}
+
 var (
 	_ resource.Resource                     = (*guardrailResource)(nil)
 	_ resource.ResourceWithConfigure        = (*guardrailResource)(nil)
@@ -352,30 +358,5 @@ func (r *guardrailResource) apply(m *guardrailResourceModel, a *guardrailAPI) er
 // ---------------------------------------------------------------------------
 // JSON helpers
 // ---------------------------------------------------------------------------
-
-// parseRulesJSON decodes the user-supplied JSON string into []any so we can
-// include it as a real JSON array in the request body (not a quoted string).
-func parseRulesJSON(s string) ([]any, error) {
-	if s == "" {
-		return []any{}, nil
-	}
-	var rules []any
-	if err := json.Unmarshal([]byte(s), &rules); err != nil {
-		return nil, fmt.Errorf("rules must be a valid JSON array: %w", err)
-	}
-	return rules, nil
-}
-
-// compactJSON normalises raw JSON to a compact single-line representation for
-// stable state storage (avoids spurious diffs from whitespace).
-func compactJSON(raw json.RawMessage) (string, error) {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return "", err
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
+// compactJSON and parseJSONArray live in helpers.go (shared with flow_resource).
+// parseRulesJSON is declared above as a guardrail-specific alias.
