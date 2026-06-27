@@ -343,15 +343,12 @@ func (r *guardrailResource) apply(m *guardrailResourceModel, a *guardrailAPI) er
 	}
 
 	// Normalise rules to compact JSON for stable state storage.
-	if len(a.Rules) > 0 {
-		compact, err := compactJSON(a.Rules)
-		if err != nil {
-			return fmt.Errorf("normalise rules JSON: %w", err)
-		}
-		m.Rules = types.StringValue(compact)
-	} else {
-		m.Rules = types.StringValue("[]")
+	// compactJSON handles nil/empty/null by returning "[]".
+	compact, err := compactJSON(a.Rules)
+	if err != nil {
+		return fmt.Errorf("normalise rules JSON: %w", err)
 	}
+	m.Rules = types.StringValue(compact)
 	return nil
 }
 

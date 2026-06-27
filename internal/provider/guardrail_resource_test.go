@@ -135,6 +135,42 @@ func TestGuardrailApplyEmptyRules(t *testing.T) {
 	}
 }
 
+// apply() must set rules to "[]" when the API returns JSON null (absent field).
+func TestGuardrailApplyNullRules(t *testing.T) {
+	r := &guardrailResource{}
+	m := &guardrailResourceModel{}
+	a := &guardrailAPI{
+		ID:      "policy_null",
+		Name:    "null-rules",
+		Enabled: true,
+		Rules:   json.RawMessage(`null`),
+	}
+	if err := r.apply(m, a); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if m.Rules.ValueString() != "[]" {
+		t.Errorf("rules should be '[]' for null, got %q", m.Rules.ValueString())
+	}
+}
+
+// apply() must set rules to "[]" when the API returns a nil RawMessage (absent/zero field).
+func TestGuardrailApplyNilRules(t *testing.T) {
+	r := &guardrailResource{}
+	m := &guardrailResourceModel{}
+	a := &guardrailAPI{
+		ID:      "policy_nil",
+		Name:    "nil-rules",
+		Enabled: true,
+		Rules:   nil,
+	}
+	if err := r.apply(m, a); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if m.Rules.ValueString() != "[]" {
+		t.Errorf("rules should be '[]' for nil RawMessage, got %q", m.Rules.ValueString())
+	}
+}
+
 // apply() must reflect a non-empty description and leave it null when absent.
 func TestGuardrailApplyDescription(t *testing.T) {
 	r := &guardrailResource{}
@@ -183,5 +219,28 @@ func TestCompactJSON(t *testing.T) {
 	want := `[{"action":"block","type":"prompt_injection"}]`
 	if got != want {
 		t.Errorf("compactJSON mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// compactJSON must return "[]" for nil, empty, and literal JSON null inputs.
+func TestCompactJSONNullAndNil(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"nil", nil},
+		{"empty", json.RawMessage{}},
+		{"json_null", json.RawMessage(`null`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := compactJSON(tc.raw)
+			if err != nil {
+				t.Fatalf("compactJSON(%s): unexpected error: %v", tc.name, err)
+			}
+			if got != "[]" {
+				t.Errorf("compactJSON(%s): got %q, want \"[]\"", tc.name, got)
+			}
+		})
 	}
 }

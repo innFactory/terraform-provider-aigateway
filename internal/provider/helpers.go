@@ -78,7 +78,12 @@ func parseJSONArray(s string) ([]any, error) {
 
 // compactJSON normalises raw JSON to a compact single-line representation for
 // stable state storage (avoids spurious diffs from whitespace).
+// A nil, zero-length, or literal JSON null input is treated as an absent array
+// and returns "[]" — callers do not need to special-case these states.
 func compactJSON(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "[]", nil
+	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return "", err

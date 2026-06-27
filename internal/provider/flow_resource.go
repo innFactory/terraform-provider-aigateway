@@ -360,14 +360,11 @@ func (r *flowResource) apply(m *flowResourceModel, a *flowAPI) error {
 	}
 
 	// Normalise steps to compact JSON for stable state storage.
-	if len(a.Steps) > 0 {
-		compact, err := compactJSON(a.Steps)
-		if err != nil {
-			return fmt.Errorf("normalise steps JSON: %w", err)
-		}
-		m.Steps = types.StringValue(compact)
-	} else {
-		m.Steps = types.StringValue("[]")
+	// compactJSON handles nil/empty/null by returning "[]".
+	compact, err := compactJSON(a.Steps)
+	if err != nil {
+		return fmt.Errorf("normalise steps JSON: %w", err)
 	}
+	m.Steps = types.StringValue(compact)
 	return nil
 }

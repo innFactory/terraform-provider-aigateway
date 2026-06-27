@@ -212,6 +212,42 @@ func TestFlowApplyCompactsSteps(t *testing.T) {
 	}
 }
 
+// apply() must set steps to "[]" when the API returns JSON null (absent field).
+func TestFlowApplyNullSteps(t *testing.T) {
+	r := &flowResource{}
+	m := &flowResourceModel{}
+	a := &flowAPI{
+		ID:    "flow_null",
+		Name:  "null-steps",
+		Entry: "s1",
+		Steps: json.RawMessage(`null`),
+	}
+	if err := r.apply(m, a); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if m.Steps.ValueString() != "[]" {
+		t.Errorf("steps should be '[]' for null, got %q", m.Steps.ValueString())
+	}
+}
+
+// apply() must set steps to "[]" when the API returns a nil RawMessage (absent/zero field).
+func TestFlowApplyNilSteps(t *testing.T) {
+	r := &flowResource{}
+	m := &flowResourceModel{}
+	a := &flowAPI{
+		ID:    "flow_nil",
+		Name:  "nil-steps",
+		Entry: "s1",
+		Steps: nil,
+	}
+	if err := r.apply(m, a); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if m.Steps.ValueString() != "[]" {
+		t.Errorf("steps should be '[]' for nil RawMessage, got %q", m.Steps.ValueString())
+	}
+}
+
 // entry attribute is required — verify it round-trips correctly.
 func TestFlowApplyEntryRequired(t *testing.T) {
 	r := &flowResource{}
