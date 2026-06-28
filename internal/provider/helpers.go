@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -58,4 +60,37 @@ func boolPtr(v types.Bool) *bool {
 	}
 	x := v.ValueBool()
 	return &x
+}
+
+// parseJSONArray decodes a user-supplied JSON string into []any so it can be
+// included as a real JSON array in the request body (not a quoted string).
+// Returns an empty slice for an empty input string.
+func parseJSONArray(s string) ([]any, error) {
+	if s == "" {
+		return []any{}, nil
+	}
+	var arr []any
+	if err := json.Unmarshal([]byte(s), &arr); err != nil {
+		return nil, fmt.Errorf("must be a valid JSON array: %w", err)
+	}
+	return arr, nil
+}
+
+// compactJSON normalises raw JSON to a compact single-line representation for
+// stable state storage (avoids spurious diffs from whitespace).
+// A nil, zero-length, or literal JSON null input is treated as an absent array
+// and returns "[]" — callers do not need to special-case these states.
+func compactJSON(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "[]", nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
