@@ -27,17 +27,18 @@ func newProviderResource() resource.Resource {
 }
 
 type providerResourceModel struct {
-	ID         types.String `tfsdk:"id"`
-	Type       types.String `tfsdk:"type"`
-	Name       types.String `tfsdk:"name"`
-	Endpoint   types.String `tfsdk:"endpoint"`
-	AuthType   types.String `tfsdk:"auth_type"`
-	Credential types.String `tfsdk:"credential"`
-	Region     types.String `tfsdk:"region"`
-	ProjectID  types.String `tfsdk:"project_id"`
-	APIVersion types.String `tfsdk:"api_version"`
-	Enabled    types.Bool   `tfsdk:"enabled"`
-	ManagedBy  types.String `tfsdk:"managed_by"`
+	ID           types.String `tfsdk:"id"`
+	Type         types.String `tfsdk:"type"`
+	Name         types.String `tfsdk:"name"`
+	Endpoint     types.String `tfsdk:"endpoint"`
+	AuthType     types.String `tfsdk:"auth_type"`
+	Credential   types.String `tfsdk:"credential"`
+	Region       types.String `tfsdk:"region"`
+	ProjectID    types.String `tfsdk:"project_id"`
+	APIVersion   types.String `tfsdk:"api_version"`
+	Enabled      types.Bool   `tfsdk:"enabled"`
+	ManagedBy    types.String `tfsdk:"managed_by"`
+	InferenceGeo types.String `tfsdk:"inference_geo"`
 }
 
 func (r *providerResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -99,6 +100,10 @@ func (r *providerResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Optional:    true,
 				Description: "Free-form marker stored on the gateway object (e.g. companygpt-terraform) so the UI can flag IaC-managed providers/models.",
 			},
+			"inference_geo": schema.StringAttribute{
+				Optional:    true,
+				Description: "AWS Bedrock cross-region inference geo prefix (eu | us | apac | au | jp | global). When set, model IDs are auto-prefixed (e.g. eu.anthropic.claude-sonnet-4-6). Only applies to aws_bedrock providers.",
+			},
 			"enabled": schema.BoolAttribute{
 				Optional:    true,
 				Computed:    true,
@@ -122,39 +127,42 @@ func (r *providerResource) Configure(_ context.Context, req resource.ConfigureRe
 }
 
 type providerCreateBody struct {
-	Type       string  `json:"type"`
-	Name       string  `json:"name"`
-	Endpoint   string  `json:"endpoint"`
-	AuthType   string  `json:"authType"`
-	Credential *string `json:"credential,omitempty"`
-	Region     *string `json:"region,omitempty"`
-	ProjectID  *string `json:"projectId,omitempty"`
-	APIVersion *string `json:"apiVersion,omitempty"`
-	ManagedBy  *string `json:"managedBy,omitempty"`
+	Type         string  `json:"type"`
+	Name         string  `json:"name"`
+	Endpoint     string  `json:"endpoint"`
+	AuthType     string  `json:"authType"`
+	Credential   *string `json:"credential,omitempty"`
+	Region       *string `json:"region,omitempty"`
+	ProjectID    *string `json:"projectId,omitempty"`
+	APIVersion   *string `json:"apiVersion,omitempty"`
+	ManagedBy    *string `json:"managedBy,omitempty"`
+	InferenceGeo *string `json:"inferenceGeo,omitempty"`
 }
 
 type providerUpdateBody struct {
-	Name       *string `json:"name,omitempty"`
-	Endpoint   *string `json:"endpoint,omitempty"`
-	Credential *string `json:"credential,omitempty"`
-	Region     *string `json:"region,omitempty"`
-	ProjectID  *string `json:"projectId,omitempty"`
-	APIVersion *string `json:"apiVersion,omitempty"`
-	ManagedBy  *string `json:"managedBy,omitempty"`
-	Enabled    *bool   `json:"enabled,omitempty"`
+	Name         *string `json:"name,omitempty"`
+	Endpoint     *string `json:"endpoint,omitempty"`
+	Credential   *string `json:"credential,omitempty"`
+	Region       *string `json:"region,omitempty"`
+	ProjectID    *string `json:"projectId,omitempty"`
+	APIVersion   *string `json:"apiVersion,omitempty"`
+	ManagedBy    *string `json:"managedBy,omitempty"`
+	InferenceGeo *string `json:"inferenceGeo,omitempty"`
+	Enabled      *bool   `json:"enabled,omitempty"`
 }
 
 type providerAPI struct {
-	ID         string `json:"id"`
-	Type       string `json:"type"`
-	Name       string `json:"name"`
-	Endpoint   string `json:"endpoint"`
-	AuthType   string `json:"authType"`
-	Region     string `json:"region"`
-	ProjectID  string `json:"projectId"`
-	APIVersion string `json:"apiVersion"`
-	ManagedBy  string `json:"managedBy"`
-	Enabled    bool   `json:"enabled"`
+	ID           string `json:"id"`
+	Type         string `json:"type"`
+	Name         string `json:"name"`
+	Endpoint     string `json:"endpoint"`
+	AuthType     string `json:"authType"`
+	Region       string `json:"region"`
+	ProjectID    string `json:"projectId"`
+	APIVersion   string `json:"apiVersion"`
+	ManagedBy    string `json:"managedBy"`
+	InferenceGeo string `json:"inferenceGeo"`
+	Enabled      bool   `json:"enabled"`
 }
 
 func ptrIf(v types.String) *string {
@@ -176,15 +184,16 @@ func (r *providerResource) Create(ctx context.Context, req resource.CreateReques
 		authType = "apiKey"
 	}
 	body := providerCreateBody{
-		Type:       plan.Type.ValueString(),
-		Name:       plan.Name.ValueString(),
-		Endpoint:   plan.Endpoint.ValueString(),
-		AuthType:   authType,
-		Credential: ptrIf(plan.Credential),
-		Region:     ptrIf(plan.Region),
-		ProjectID:  ptrIf(plan.ProjectID),
-		APIVersion: ptrIf(plan.APIVersion),
-		ManagedBy:  ptrIf(plan.ManagedBy),
+		Type:         plan.Type.ValueString(),
+		Name:         plan.Name.ValueString(),
+		Endpoint:     plan.Endpoint.ValueString(),
+		AuthType:     authType,
+		Credential:   ptrIf(plan.Credential),
+		Region:       ptrIf(plan.Region),
+		ProjectID:    ptrIf(plan.ProjectID),
+		APIVersion:   ptrIf(plan.APIVersion),
+		ManagedBy:    ptrIf(plan.ManagedBy),
+		InferenceGeo: ptrIf(plan.InferenceGeo),
 	}
 	var out providerAPI
 	if err := r.client.do(ctx, "POST", "/api/v1/admin/providers", nil, body, &out); err != nil {
@@ -226,14 +235,15 @@ func (r *providerResource) Update(ctx context.Context, req resource.UpdateReques
 	}
 	enabled := plan.Enabled.ValueBool()
 	body := providerUpdateBody{
-		Name:       ptrIf(plan.Name),
-		Endpoint:   ptrIf(plan.Endpoint),
-		Credential: ptrIf(plan.Credential),
-		Region:     ptrIf(plan.Region),
-		ProjectID:  ptrIf(plan.ProjectID),
-		APIVersion: ptrIf(plan.APIVersion),
-		ManagedBy:  ptrIf(plan.ManagedBy),
-		Enabled:    &enabled,
+		Name:         ptrIf(plan.Name),
+		Endpoint:     ptrIf(plan.Endpoint),
+		Credential:   ptrIf(plan.Credential),
+		Region:       ptrIf(plan.Region),
+		ProjectID:    ptrIf(plan.ProjectID),
+		APIVersion:   ptrIf(plan.APIVersion),
+		ManagedBy:    ptrIf(plan.ManagedBy),
+		InferenceGeo: ptrIf(plan.InferenceGeo),
+		Enabled:      &enabled,
 	}
 	var out providerAPI
 	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/providers/"+state.ID.ValueString(), nil, body, &out); err != nil {
@@ -279,6 +289,12 @@ func (r *providerResource) apply(m *providerResourceModel, a *providerAPI) {
 	// "inconsistent result" errors when unset. No else StringNull() here.
 	if a.ManagedBy != "" {
 		m.ManagedBy = types.StringValue(a.ManagedBy)
+	}
+	// inference_geo is Optional (not Computed): mirror the same pattern as
+	// managed_by — only echo the server value when the field is set, so
+	// operators who omit it don't see a spurious null→"" diff.
+	if a.InferenceGeo != "" {
+		m.InferenceGeo = types.StringValue(a.InferenceGeo)
 	}
 	// api_version is Optional+Computed: when unset in config (every non-Azure
 	// provider) its planned value is unknown, so we MUST write a known value
