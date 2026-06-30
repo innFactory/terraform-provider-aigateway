@@ -33,10 +33,10 @@ resource "aigateway_tenant_settings" "this" {
 - `default_cost_center_id` (String) Default cost center (budget id) any unscoped key/token attributes to (gate 3 fallback). Empty = unscoped traffic skips gate 3.
 - `default_user_budget_microdollars` (Number) Per-user global monthly cap in microdollars (gate 2). Ignored when default_user_budget_unlimited = true.
 - `default_user_budget_unlimited` (Boolean) When true, the per-user global max is unlimited (gateway clears the cap).
-- `managed_revision` (String) Last-writer-wins revision. The provider stamps a fresh value on every apply; the gateway only accepts a write whose revision is newer than the stored one.
 - `org_budget_limit_microdollars` (Number) Org monthly budget cap in microdollars. Ignored when org_budget_unlimited = true.
 - `org_budget_unlimited` (Boolean) When true, the org budget is set to unlimited (no cap).
 
 ### Read-Only
 
 - `id` (String) Always 'tenant' (singleton).
+- `managed_revision` (String) Last-writer-wins revision, stamped by the provider on every apply; the gateway only accepts a write whose revision is newer than the stored one. Provider-managed (read-only).

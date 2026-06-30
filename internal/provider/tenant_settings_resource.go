@@ -7,8 +7,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -84,10 +82,15 @@ func (r *tenantSettingsResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Description: "Default cost center (budget id) any unscoped key/token attributes to (gate 3 fallback). Empty = unscoped traffic skips gate 3.",
 			},
 			"managed_revision": schema.StringAttribute{
-				Optional:      true,
-				Computed:      true,
-				Description:   "Last-writer-wins revision. The provider stamps a fresh value on every apply; the gateway only accepts a write whose revision is newer than the stored one.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				// Computed-only (provider-managed), NOT Optional, and deliberately
+				// WITHOUT UseStateForUnknown: write() stamps a fresh time.Now() on
+				// every apply, so the value legitimately changes on each update.
+				// UseStateForUnknown pinned the prior timestamp in the plan while the
+				// apply returned a new one -> "Provider produced inconsistent result
+				// after apply". Plain Computed plans it as "known after apply" on any
+				// update, so the freshly stamped revision is always accepted.
+				Computed:    true,
+				Description: "Last-writer-wins revision, stamped by the provider on every apply; the gateway only accepts a write whose revision is newer than the stored one. Provider-managed (read-only).",
 			},
 		},
 	}
