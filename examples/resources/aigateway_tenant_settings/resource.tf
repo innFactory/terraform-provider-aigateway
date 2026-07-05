@@ -1,4 +1,8 @@
 resource "aigateway_tenant_settings" "this" {
   org_budget_unlimited   = true
   default_allowed_models = ["gpt-5.4-mini", "gpt-5.4", "gemini-3.5-flash", "claude-haiku-4-5"]
+
+  # Optional: access group applied to callers in no other group — scopes
+  # /v1/models for trusted-header (LibreChat) users.
+  default_access_group_id = aigateway_access_group.librechat_default.id
 }

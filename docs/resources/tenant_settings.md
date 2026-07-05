@@ -8,7 +8,7 @@ description: |-
 
 # aigateway_tenant_settings (Resource)
 
-Singleton tenant-wide settings: default allowed models, org budget cap, tenant currency, per-user budget max, and default cost center. The currency, per-user max and default cost center fields are **last-writer-wins**: a dashboard edit is not surfaced as drift and will not be reverted by a no-op `terraform apply`.
+Singleton tenant-wide settings: default allowed models, org budget cap, tenant currency, per-user budget max, default cost center and default access group. The currency, per-user max, default cost center and default access group fields are **last-writer-wins**: a dashboard edit is not surfaced as drift and will not be reverted by a no-op `terraform apply`.
 
 ## Example Usage
 
@@ -20,6 +20,10 @@ resource "aigateway_tenant_settings" "this" {
   currency                     = "EUR"
   default_user_budget_unlimited = true
   default_cost_center_id       = aigateway_cost_center.companygpt.id
+
+  # Access group applied to callers in no other group — scopes /v1/models for
+  # trusted-header (LibreChat) users.
+  default_access_group_id = aigateway_access_group.librechat_default.id
 }
 ```
 
@@ -29,6 +33,7 @@ resource "aigateway_tenant_settings" "this" {
 ### Optional
 
 - `currency` (String) ISO 4217 tenant currency (e.g. EUR, USD). Last-writer-wins: a dashboard edit is not reverted by a no-op apply.
+- `default_access_group_id` (String) Default access group (aigateway_access_group id) applied to callers in no group — e.g. scopes /v1/models for trusted-header (LibreChat) users. Empty = allow-all when unset. Last-writer-wins: leaving it unset does not clear a dashboard-set value.
 - `default_allowed_models` (List of String) Models visible to all users / trusted-header (LibreChat) callers.
 - `default_cost_center_id` (String) Default cost center (budget id) any unscoped key/token attributes to (gate 3 fallback). Empty = unscoped traffic skips gate 3.
 - `default_user_budget_microdollars` (Number) Per-user global monthly cap in microdollars (gate 2). Ignored when default_user_budget_unlimited = true.

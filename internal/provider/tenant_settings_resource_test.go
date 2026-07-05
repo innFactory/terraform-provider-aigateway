@@ -19,6 +19,7 @@ func TestTenantPatchBodyMarshalsFull(t *testing.T) {
 		Currency:                "EUR",
 		DefaultUserBudgetMicros: &userBudget,
 		DefaultCostCenterID:     "budget_companygpt",
+		DefaultAccessGroupID:    "team_default",
 		ManagedRevision:         "2026-06-21T10:00:00Z",
 	}
 	raw, err := json.Marshal(body)
@@ -26,7 +27,7 @@ func TestTenantPatchBodyMarshalsFull(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	got := string(raw)
-	want := `{"defaultAllowedModels":["gpt-5.4"],"orgBudgetLimitMicrodollars":0,"currency":"EUR","defaultUserBudgetMicrodollars":50000000,"defaultCostCenterId":"budget_companygpt","managedRevision":"2026-06-21T10:00:00Z"}`
+	want := `{"defaultAllowedModels":["gpt-5.4"],"orgBudgetLimitMicrodollars":0,"currency":"EUR","defaultUserBudgetMicrodollars":50000000,"defaultCostCenterId":"budget_companygpt","defaultAccessGroupId":"team_default","managedRevision":"2026-06-21T10:00:00Z"}`
 	if got != want {
 		t.Errorf("patch body mismatch\n got: %s\nwant: %s", got, want)
 	}
@@ -63,6 +64,7 @@ func TestTenantSettingsReadDoesNotRevertMutableFields(t *testing.T) {
 		Currency:                types.StringValue("EUR"),
 		DefaultUserBudgetMicros: types.Int64Value(50000000),
 		DefaultCostCenterID:     types.StringValue("budget_companygpt"),
+		DefaultAccessGroupID:    types.StringValue("team_default"),
 	}
 	// applyTenantRead simulates a gateway GET that reports DIFFERENT values (a
 	// dashboard edit). Read must leave the planned/state values untouched.
@@ -70,6 +72,7 @@ func TestTenantSettingsReadDoesNotRevertMutableFields(t *testing.T) {
 		Currency:                      "USD",
 		DefaultUserBudgetMicrodollars: ptrInt64(999),
 		DefaultCostCenterID:           "budget_other",
+		DefaultAccessGroupID:          "team_other",
 	}
 	applyTenantRead(&state, &out)
 	if state.Currency.ValueString() != "EUR" {
@@ -80,6 +83,31 @@ func TestTenantSettingsReadDoesNotRevertMutableFields(t *testing.T) {
 	}
 	if state.DefaultCostCenterID.ValueString() != "budget_companygpt" {
 		t.Errorf("default cost center reverted to %q", state.DefaultCostCenterID.ValueString())
+	}
+	if state.DefaultAccessGroupID.ValueString() != "team_default" {
+		t.Errorf("default access group reverted to %q", state.DefaultAccessGroupID.ValueString())
+	}
+}
+
+// An unset default_access_group_id must be OMITTED from the PATCH body
+// (omitempty): the gateway's double-option field treats an absent key as
+// "leave unchanged", so an unset config never clears a dashboard-set value
+// (same nullability handling as defaultCostCenterId).
+func TestTenantPatchBodyOmitsUnsetDefaultAccessGroup(t *testing.T) {
+	body := tenantPatchBody{
+		DefaultAllowedModels:    []string{"gpt-4o"},
+		OrgBudgetMicros:         0,
+		DefaultUserBudgetMicros: nil,
+		ManagedRevision:         "2026-06-21T10:00:00Z",
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	want := `{"defaultAllowedModels":["gpt-4o"],"orgBudgetLimitMicrodollars":0,"defaultUserBudgetMicrodollars":null,"managedRevision":"2026-06-21T10:00:00Z"}`
+	if got != want {
+		t.Errorf("patch body mismatch\n got: %s\nwant: %s", got, want)
 	}
 }
 
