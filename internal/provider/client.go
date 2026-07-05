@@ -66,6 +66,18 @@ func isNotFound(err error) bool {
 	return false
 }
 
+// isConflict reports whether err is a gateway 409. Since gateway v0.16.16 the
+// admin model routes resolve `{model_id}` doc-id-first and answer 409 when a
+// bare model NAME matches models under multiple providers — callers use this
+// to turn that into an actionable "address by doc id" diagnostic.
+func isConflict(err error) bool {
+	var ae *apiError
+	if errors.As(err, &ae) {
+		return ae.Status == http.StatusConflict
+	}
+	return false
+}
+
 // do issues a JSON request to the admin API. `body` is marshalled when non-nil;
 // the response is decoded into `out` when non-nil. A 2xx with an empty body and
 // a non-nil out is tolerated. >=400 returns an *apiError.

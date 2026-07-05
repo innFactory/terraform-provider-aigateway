@@ -47,7 +47,7 @@ resource "aigateway_deployment_group" "gpt_5_4" {
 ### Required
 
 - `deployments` (Attributes List) Provider deployments that serve this model. (see [below for nested schema](#nestedatt--deployments))
-- `model_id` (String) The model this deployment group belongs to.
+- `model_id` (String) The model this deployment group belongs to. Accepts the caller-chosen model_id or the server doc id (model_<uuid>); use aigateway_model.<name>.id when the same model name exists under multiple providers.
 
 ### Optional
 

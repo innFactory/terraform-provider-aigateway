@@ -3,12 +3,12 @@
 page_title: "aigateway_model Resource - aigateway"
 subcategory: ""
 description: |-
-  A model exposed by the gateway, bound to an aigateway_provider. Keyed on the caller-chosen model_id.
+  A model exposed by the gateway, bound to an aigateway_provider. Identified by the caller-chosen model_id; the provider addresses the gateway by the server doc id (id, model_<uuid>) so the same model name may exist under multiple providers. Import by doc id, or by name when the name is unique.
 ---
 
 # aigateway_model (Resource)
 
-A model exposed by the gateway, bound to an aigateway_provider. Keyed on the caller-chosen model_id.
+A model exposed by the gateway, bound to an aigateway_provider. Identified by the caller-chosen model_id; the provider addresses the gateway by the server doc id (id, model_<uuid>) so the same model name may exist under multiple providers. Import by doc id, or by name when the name is unique.
 
 ## Example Usage
 
@@ -47,4 +47,4 @@ resource "aigateway_model" "gpt_5_4_mini" {
 
 ### Read-Only
 
-- `id` (String) Server-assigned internal id (model_<uuid>).
+- `id` (String) Server-assigned internal doc id (model_<uuid>). Read/Update/Delete address the gateway by this id, so duplicate model names across providers stay unambiguous.

@@ -1,8 +1,15 @@
 package provider
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -53,5 +60,289 @@ func TestDefBoolDefaultsOnNullAndUnknown(t *testing.T) {
 	}
 	if got := defBool(types.BoolNull(), false); got != false {
 		t.Errorf("null => default false, got %v", got)
+	}
+}
+
+// ── by-id addressing (duplicate model names across providers) ───────────────
+//
+// Gateway >= v0.16.16 resolves /api/v1/admin/models/{model_id} doc-id-first
+// and answers 409 when a bare NAME matches models under multiple providers.
+// The resource therefore addresses by the server doc id whenever state knows
+// it, falling back to the name only for legacy state without an id.
+
+func TestModelAdminPathPrefersDocID(t *testing.T) {
+	p, byName := modelAdminPath(types.StringValue("model_abc"), types.StringValue("gpt-4o"))
+	if p != "/api/v1/admin/models/model_abc" || byName {
+		t.Errorf("id set: got (%q, byName=%v), want doc-id path", p, byName)
+	}
+	for name, id := range map[string]types.String{
+		"null":    types.StringNull(),
+		"unknown": types.StringUnknown(),
+		"empty":   types.StringValue(""),
+	} {
+		p, byName := modelAdminPath(id, types.StringValue("gpt-4o"))
+		if p != "/api/v1/admin/models/gpt-4o" || !byName {
+			t.Errorf("%s id: got (%q, byName=%v), want name fallback", name, p, byName)
+		}
+	}
+}
+
+func TestResolveModelImportID(t *testing.T) {
+	list := []modelAPI{
+		{ID: "model_a", ModelID: "claude-opus-4-7", ProviderID: "provider_tf"},
+		{ID: "model_b", ModelID: "claude-opus-4-7", ProviderID: "provider_jena"},
+		{ID: "model_c", ModelID: "gpt-4o", ProviderID: "provider_azure"},
+	}
+	if got, err := resolveModelImportID(list, "gpt-4o"); err != nil || got != "model_c" {
+		t.Errorf("unique name: got (%q, %v), want model_c", got, err)
+	}
+	if _, err := resolveModelImportID(list, "claude-opus-4-7"); err == nil ||
+		!strings.Contains(err.Error(), "ambiguous") ||
+		!strings.Contains(err.Error(), "model_a") || !strings.Contains(err.Error(), "model_b") {
+		t.Errorf("ambiguous name must error listing candidate doc ids, got %v", err)
+	}
+	if _, err := resolveModelImportID(list, "nope"); err == nil || !strings.Contains(err.Error(), "no model") {
+		t.Errorf("missing name must error, got %v", err)
+	}
+}
+
+// ── framework-level plumbing helpers ─────────────────────────────────────────
+
+func modelTestSchema(t *testing.T) resource.SchemaResponse {
+	t.Helper()
+	var sr resource.SchemaResponse
+	(&modelResource{}).Schema(context.Background(), resource.SchemaRequest{}, &sr)
+	if sr.Diagnostics.HasError() {
+		t.Fatalf("schema: %v", sr.Diagnostics)
+	}
+	return sr
+}
+
+func mustModelState(t *testing.T, m modelResourceModel) tfsdk.State {
+	t.Helper()
+	st := tfsdk.State{Schema: modelTestSchema(t).Schema}
+	if d := st.Set(context.Background(), m); d.HasError() {
+		t.Fatalf("state set: %v", d)
+	}
+	return st
+}
+
+func mustModelPlan(t *testing.T, m modelResourceModel) tfsdk.Plan {
+	t.Helper()
+	p := tfsdk.Plan{Schema: modelTestSchema(t).Schema}
+	if d := p.Set(context.Background(), m); d.HasError() {
+		t.Fatalf("plan set: %v", d)
+	}
+	return p
+}
+
+func modelTestServer(t *testing.T, handler http.HandlerFunc) *modelResource {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return &modelResource{client: newClient(srv.URL, "test-key", "test")}
+}
+
+func echoModelHandler(gotMethod, gotPath *string, a modelAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		*gotMethod, *gotPath = r.Method, r.URL.Path
+		_ = json.NewEncoder(w).Encode(a)
+	}
+}
+
+// ── Read / Update / Delete hit the id-based path when state has the doc id ──
+
+func TestModelReadAddressesByDocID(t *testing.T) {
+	var method, path string
+	r := modelTestServer(t, echoModelHandler(&method, &path, modelAPI{
+		ID: "model_abc", ModelID: "claude-opus-4-7", DisplayName: "Opus",
+		ProviderID: "provider_tf", ProviderModelID: "claude-opus-4-7",
+		Capability: "chat", ModelType: "chat", Enabled: true,
+	}))
+	st := mustModelState(t, modelResourceModel{
+		ID:      types.StringValue("model_abc"),
+		ModelID: types.StringValue("claude-opus-4-7"),
+	})
+	resp := &resource.ReadResponse{State: st}
+	r.Read(context.Background(), resource.ReadRequest{State: st}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("read: %v", resp.Diagnostics)
+	}
+	if method != "GET" || path != "/api/v1/admin/models/model_abc" {
+		t.Errorf("read hit %s %s, want GET /api/v1/admin/models/model_abc", method, path)
+	}
+}
+
+func TestModelReadFallsBackToNameWithoutDocID(t *testing.T) {
+	var method, path string
+	r := modelTestServer(t, echoModelHandler(&method, &path, modelAPI{
+		ID: "model_abc", ModelID: "claude-opus-4-7", DisplayName: "Opus",
+		ProviderID: "provider_tf", ProviderModelID: "claude-opus-4-7",
+		Capability: "chat", ModelType: "chat", Enabled: true,
+	}))
+	st := mustModelState(t, modelResourceModel{ModelID: types.StringValue("claude-opus-4-7")})
+	resp := &resource.ReadResponse{State: st}
+	r.Read(context.Background(), resource.ReadRequest{State: st}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("read: %v", resp.Diagnostics)
+	}
+	if path != "/api/v1/admin/models/claude-opus-4-7" {
+		t.Errorf("read hit %s, want name-based path", path)
+	}
+	// The name-based read must backfill the doc id so the NEXT operation
+	// addresses by id.
+	var got modelResourceModel
+	if d := resp.State.Get(context.Background(), &got); d.HasError() {
+		t.Fatalf("state get: %v", d)
+	}
+	if got.ID.ValueString() != "model_abc" {
+		t.Errorf("read must backfill id, got %q", got.ID.ValueString())
+	}
+}
+
+func TestModelReadAmbiguousNameYieldsReimportDiagnostic(t *testing.T) {
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"detail": "Model name 'claude-opus-4-7' exists under multiple providers — address it by its doc id instead: model_a (provider provider_tf), model_b (provider provider_jena)",
+		})
+	})
+	st := mustModelState(t, modelResourceModel{ModelID: types.StringValue("claude-opus-4-7")})
+	resp := &resource.ReadResponse{State: st}
+	r.Read(context.Background(), resource.ReadRequest{State: st}, resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("ambiguous by-name read must error, not silently drop the resource")
+	}
+	detail := resp.Diagnostics.Errors()[0].Detail()
+	if !strings.Contains(detail, "re-import") || !strings.Contains(detail, "model_<uuid>") {
+		t.Errorf("409 diagnostic must tell the user to re-import by doc id, got %q", detail)
+	}
+}
+
+func TestModelUpdateAddressesByDocID(t *testing.T) {
+	var method, path string
+	r := modelTestServer(t, echoModelHandler(&method, &path, modelAPI{
+		ID: "model_abc", ModelID: "claude-opus-4-7", DisplayName: "Opus v2",
+		ProviderID: "provider_tf", ProviderModelID: "claude-opus-4-7",
+		Capability: "chat", ModelType: "chat", Enabled: true,
+	}))
+	m := modelResourceModel{
+		ID:              types.StringValue("model_abc"),
+		ModelID:         types.StringValue("claude-opus-4-7"),
+		DisplayName:     types.StringValue("Opus v2"),
+		ProviderID:      types.StringValue("provider_tf"),
+		ProviderModelID: types.StringValue("claude-opus-4-7"),
+	}
+	resp := &resource.UpdateResponse{State: mustModelState(t, m)}
+	r.Update(context.Background(), resource.UpdateRequest{
+		Plan:  mustModelPlan(t, m),
+		State: mustModelState(t, m),
+	}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("update: %v", resp.Diagnostics)
+	}
+	if method != "PUT" || path != "/api/v1/admin/models/model_abc" {
+		t.Errorf("update hit %s %s, want PUT /api/v1/admin/models/model_abc", method, path)
+	}
+}
+
+func TestModelDeleteAddressesByDocID(t *testing.T) {
+	var method, path string
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		method, path = req.Method, req.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	})
+	st := mustModelState(t, modelResourceModel{
+		ID:      types.StringValue("model_abc"),
+		ModelID: types.StringValue("claude-opus-4-7"),
+	})
+	resp := &resource.DeleteResponse{State: st}
+	r.Delete(context.Background(), resource.DeleteRequest{State: st}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("delete: %v", resp.Diagnostics)
+	}
+	if method != "DELETE" || path != "/api/v1/admin/models/model_abc" {
+		t.Errorf("delete hit %s %s, want DELETE /api/v1/admin/models/model_abc", method, path)
+	}
+}
+
+// ── import: by doc id, by unique name, ambiguous name ────────────────────────
+
+func TestModelImportByDocID(t *testing.T) {
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		t.Errorf("import by doc id must not call the API, hit %s %s", req.Method, req.URL.Path)
+	})
+	resp := &resource.ImportStateResponse{State: mustModelState(t, modelResourceModel{})}
+	r.ImportState(context.Background(), resource.ImportStateRequest{ID: "model_abc"}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("import: %v", resp.Diagnostics)
+	}
+	var got modelResourceModel
+	if d := resp.State.Get(context.Background(), &got); d.HasError() {
+		t.Fatalf("state get: %v", d)
+	}
+	if got.ID.ValueString() != "model_abc" {
+		t.Errorf("id = %q, want model_abc", got.ID.ValueString())
+	}
+	if !got.ModelID.IsNull() {
+		t.Errorf("model_id must stay null (filled by the follow-up Read), got %q", got.ModelID.ValueString())
+	}
+}
+
+func TestModelImportByUniqueNameResolvesDocID(t *testing.T) {
+	var path string
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		path = req.URL.Path
+		_ = json.NewEncoder(w).Encode([]modelAPI{
+			{ID: "model_a", ModelID: "claude-opus-4-7", ProviderID: "provider_tf"},
+			{ID: "model_c", ModelID: "gpt-4o", ProviderID: "provider_azure"},
+		})
+	})
+	resp := &resource.ImportStateResponse{State: mustModelState(t, modelResourceModel{})}
+	r.ImportState(context.Background(), resource.ImportStateRequest{ID: "gpt-4o"}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("import: %v", resp.Diagnostics)
+	}
+	if path != "/api/v1/admin/models" {
+		t.Errorf("import resolved via %s, want the LIST endpoint", path)
+	}
+	var got modelResourceModel
+	if d := resp.State.Get(context.Background(), &got); d.HasError() {
+		t.Fatalf("state get: %v", d)
+	}
+	if got.ID.ValueString() != "model_c" || got.ModelID.ValueString() != "gpt-4o" {
+		t.Errorf("import must record both handles, got id=%q model_id=%q",
+			got.ID.ValueString(), got.ModelID.ValueString())
+	}
+}
+
+func TestModelImportAmbiguousNameErrorsCleanly(t *testing.T) {
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		_ = json.NewEncoder(w).Encode([]modelAPI{
+			{ID: "model_a", ModelID: "claude-opus-4-7", ProviderID: "provider_tf"},
+			{ID: "model_b", ModelID: "claude-opus-4-7", ProviderID: "provider_jena"},
+		})
+	})
+	resp := &resource.ImportStateResponse{State: mustModelState(t, modelResourceModel{})}
+	r.ImportState(context.Background(), resource.ImportStateRequest{ID: "claude-opus-4-7"}, resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("ambiguous name import must error")
+	}
+	detail := resp.Diagnostics.Errors()[0].Detail()
+	if !strings.Contains(detail, "ambiguous") || !strings.Contains(detail, "model_a") {
+		t.Errorf("error must call out ambiguity and candidate doc ids, got %q", detail)
+	}
+}
+
+// ambiguousModelRefDetail (fallback_chain / deployment_group / data source):
+// a 409 gains the doc-id hint, other errors pass through untouched.
+func TestAmbiguousModelRefDetail(t *testing.T) {
+	conflict := &apiError{Status: http.StatusConflict, Message: "exists under multiple providers"}
+	if got := ambiguousModelRefDetail(conflict); !strings.Contains(got, "aigateway_model.<name>.id") {
+		t.Errorf("409 must gain the doc-id hint, got %q", got)
+	}
+	plain := &apiError{Status: http.StatusBadRequest, Message: "bad"}
+	if got := ambiguousModelRefDetail(plain); got != plain.Error() {
+		t.Errorf("non-409 must pass through, got %q", got)
 	}
 }

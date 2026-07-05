@@ -73,7 +73,7 @@ func (r *deploymentGroupResource) Schema(_ context.Context, _ resource.SchemaReq
 		Attributes: map[string]schema.Attribute{
 			"model_id": schema.StringAttribute{
 				Required:      true,
-				Description:   "The model this deployment group belongs to.",
+				Description:   "The model this deployment group belongs to. Accepts the caller-chosen model_id or the server doc id (model_<uuid>); use aigateway_model.<name>.id when the same model name exists under multiple providers.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"strategy": schema.StringAttribute{
@@ -307,7 +307,7 @@ func (r *deploymentGroupResource) Create(ctx context.Context, req resource.Creat
 	}
 	out, err := r.put(ctx, &plan)
 	if err != nil {
-		resp.Diagnostics.AddError("Set deployment group failed", err.Error())
+		resp.Diagnostics.AddError("Set deployment group failed", ambiguousModelRefDetail(err))
 		return
 	}
 	plan.apply(out)
@@ -328,7 +328,7 @@ func (r *deploymentGroupResource) Read(ctx context.Context, req resource.ReadReq
 		return
 	}
 	if err != nil {
-		resp.Diagnostics.AddError("Read deployment group failed", err.Error())
+		resp.Diagnostics.AddError("Read deployment group failed", ambiguousModelRefDetail(err))
 		return
 	}
 	if out == nil {
@@ -348,7 +348,7 @@ func (r *deploymentGroupResource) Update(ctx context.Context, req resource.Updat
 	}
 	out, err := r.put(ctx, &plan)
 	if err != nil {
-		resp.Diagnostics.AddError("Update deployment group failed", err.Error())
+		resp.Diagnostics.AddError("Update deployment group failed", ambiguousModelRefDetail(err))
 		return
 	}
 	plan.apply(out)
@@ -364,7 +364,7 @@ func (r *deploymentGroupResource) Delete(ctx context.Context, req resource.Delet
 	// An empty deployments list removes the group (reverts to the legacy 1:1 binding).
 	empty := deploymentGroupBody{Deployments: []deploymentBody{}}
 	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+state.ModelID.ValueString()+"/deployment-group", nil, empty, nil); err != nil && !isNotFound(err) {
-		resp.Diagnostics.AddError("Clear deployment group failed", err.Error())
+		resp.Diagnostics.AddError("Clear deployment group failed", ambiguousModelRefDetail(err))
 	}
 }
 

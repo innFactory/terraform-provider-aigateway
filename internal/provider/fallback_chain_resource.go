@@ -40,7 +40,7 @@ func (r *fallbackChainResource) Schema(_ context.Context, _ resource.SchemaReque
 		Attributes: map[string]schema.Attribute{
 			"model_id": schema.StringAttribute{
 				Required:      true,
-				Description:   "The model whose fallback chain this manages.",
+				Description:   "The model whose fallback chain this manages. Accepts the caller-chosen model_id or the server doc id (model_<uuid>); use aigateway_model.<name>.id when the same model name exists under multiple providers.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"fallback_models": schema.ListAttribute{
@@ -78,7 +78,7 @@ func (r *fallbackChainResource) Create(ctx context.Context, req resource.CreateR
 		return
 	}
 	if err := r.write(ctx, &plan); err != nil {
-		resp.Diagnostics.AddError("Set fallback chain failed", err.Error())
+		resp.Diagnostics.AddError("Set fallback chain failed", ambiguousModelRefDetail(err))
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
@@ -97,7 +97,7 @@ func (r *fallbackChainResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 	if err != nil {
-		resp.Diagnostics.AddError("Read fallback chain failed", err.Error())
+		resp.Diagnostics.AddError("Read fallback chain failed", ambiguousModelRefDetail(err))
 		return
 	}
 	state.FallbackModels = strList(ctx, &resp.Diagnostics, out)
@@ -111,7 +111,7 @@ func (r *fallbackChainResource) Update(ctx context.Context, req resource.UpdateR
 		return
 	}
 	if err := r.write(ctx, &plan); err != nil {
-		resp.Diagnostics.AddError("Update fallback chain failed", err.Error())
+		resp.Diagnostics.AddError("Update fallback chain failed", ambiguousModelRefDetail(err))
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
@@ -126,7 +126,7 @@ func (r *fallbackChainResource) Delete(ctx context.Context, req resource.DeleteR
 	// Clear the chain (empty list).
 	body := fallbackChainBody{FallbackModels: []string{}}
 	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+state.ModelID.ValueString()+"/fallback", nil, body, nil); err != nil && !isNotFound(err) {
-		resp.Diagnostics.AddError("Clear fallback chain failed", err.Error())
+		resp.Diagnostics.AddError("Clear fallback chain failed", ambiguousModelRefDetail(err))
 	}
 }
 
