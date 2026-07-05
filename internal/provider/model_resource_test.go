@@ -346,3 +346,116 @@ func TestAmbiguousModelRefDetail(t *testing.T) {
 		t.Errorf("non-409 must pass through, got %q", got)
 	}
 }
+
+// Version-skew guard: a by-doc-id read that 404s (gateway < v0.16.16 resolves
+// names only) must retry by name instead of pruning the resource from state.
+func TestModelReadDocID404FallsBackToName(t *testing.T) {
+	var paths []string
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		paths = append(paths, req.URL.Path)
+		if strings.HasSuffix(req.URL.Path, "/model_abc") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(modelAPI{
+			ID: "model_abc", ModelID: "gpt-5.1", DisplayName: "GPT 5.1",
+			ProviderID: "provider_tf", ProviderModelID: "gpt-5.1",
+			Capability: "chat", ModelType: "chat", Enabled: true,
+		})
+	})
+	st := mustModelState(t, modelResourceModel{
+		ID:      types.StringValue("model_abc"),
+		ModelID: types.StringValue("gpt-5.1"),
+	})
+	resp := &resource.ReadResponse{State: st}
+	r.Read(context.Background(), resource.ReadRequest{State: st}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("read: %v", resp.Diagnostics)
+	}
+	if len(paths) != 2 || paths[1] != "/api/v1/admin/models/gpt-5.1" {
+		t.Errorf("expected id-read then name-fallback, got %v", paths)
+	}
+	var got modelResourceModel
+	if d := resp.State.Get(context.Background(), &got); d.HasError() {
+		t.Fatalf("state get: %v", d)
+	}
+	if got.ID.ValueString() != "model_abc" {
+		t.Errorf("resource must stay in state with id backfilled, got %q", got.ID.ValueString())
+	}
+}
+
+// Create on 409 adopts the existing (provider, model_id) doc and aligns it.
+func TestModelCreateAdoptsExistingOnConflict(t *testing.T) {
+	var putPath string
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case req.Method == "POST":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"Model already exists: gpt-5.1"}`))
+		case req.Method == "GET":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]modelAPI{
+				{ID: "model_other", ModelID: "gpt-5.1", ProviderID: "provider_OTHER"},
+				{ID: "model_mine", ModelID: "gpt-5.1", ProviderID: "provider_tf"},
+			})
+		case req.Method == "PUT":
+			putPath = req.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(modelAPI{
+				ID: "model_mine", ModelID: "gpt-5.1", DisplayName: "gpt-5.1",
+				ProviderID: "provider_tf", ProviderModelID: "gpt-5.1",
+				Capability: "chat", ModelType: "chat", Enabled: true,
+			})
+		}
+	})
+	plan := mustModelPlan(t, modelResourceModel{
+		ModelID:         types.StringValue("gpt-5.1"),
+		DisplayName:     types.StringValue("gpt-5.1"),
+		ProviderID:      types.StringValue("provider_tf"),
+		ProviderModelID: types.StringValue("gpt-5.1"),
+	})
+	resp := &resource.CreateResponse{State: mustModelState(t, modelResourceModel{})}
+	r.Create(context.Background(), resource.CreateRequest{Plan: plan}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("create should adopt on conflict: %v", resp.Diagnostics)
+	}
+	if putPath != "/api/v1/admin/models/model_mine" {
+		t.Errorf("adoption must align the SAME-provider doc, PUT %q", putPath)
+	}
+	var got modelResourceModel
+	if d := resp.State.Get(context.Background(), &got); d.HasError() {
+		t.Fatalf("state get: %v", d)
+	}
+	if got.ID.ValueString() != "model_mine" {
+		t.Errorf("adopted id, got %q", got.ID.ValueString())
+	}
+}
+
+// A conflict whose existing doc belongs to ANOTHER provider is a real error.
+func TestModelCreateConflictOtherProviderErrors(t *testing.T) {
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		switch req.Method {
+		case "POST":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"Model already exists: gpt-5.1"}`))
+		case "GET":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]modelAPI{
+				{ID: "model_other", ModelID: "gpt-5.1", ProviderID: "provider_OTHER"},
+			})
+		}
+	})
+	plan := mustModelPlan(t, modelResourceModel{
+		ModelID:         types.StringValue("gpt-5.1"),
+		DisplayName:     types.StringValue("gpt-5.1"),
+		ProviderID:      types.StringValue("provider_tf"),
+		ProviderModelID: types.StringValue("gpt-5.1"),
+	})
+	resp := &resource.CreateResponse{State: mustModelState(t, modelResourceModel{})}
+	r.Create(context.Background(), resource.CreateRequest{Plan: plan}, resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("conflict owned by another provider must error, not adopt")
+	}
+}
