@@ -1,11 +1,44 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+// managed_revision must be Computed-only with NO plan modifiers. write() stamps
+// a fresh time.Now() on every apply, so the value changes on each update. The
+// previous schema used Optional+Computed+UseStateForUnknown, which pinned the
+// prior timestamp in the plan while the apply returned a new one -> "Provider
+// produced inconsistent result after apply" on every tenant_settings change.
+// This guards against re-introducing that bug.
+func TestTenantSettingsManagedRevisionIsComputedOnly(t *testing.T) {
+	r := &tenantSettingsResource{}
+	var resp resource.SchemaResponse
+	r.Schema(context.Background(), resource.SchemaRequest{}, &resp)
+
+	raw, ok := resp.Schema.Attributes["managed_revision"]
+	if !ok {
+		t.Fatal("managed_revision attribute missing from schema")
+	}
+	attr, ok := raw.(schema.StringAttribute)
+	if !ok {
+		t.Fatalf("managed_revision is %T, want schema.StringAttribute", raw)
+	}
+	if !attr.Computed {
+		t.Error("managed_revision must be Computed (provider-stamped)")
+	}
+	if attr.Optional {
+		t.Error("managed_revision must NOT be Optional — it is provider-managed, not user-set")
+	}
+	if len(attr.PlanModifiers) != 0 {
+		t.Errorf("managed_revision must have NO plan modifiers (UseStateForUnknown caused inconsistent-result-after-apply); got %d", len(attr.PlanModifiers))
+	}
+}
 
 // The PATCH body must carry currency, user-max, default cost center and a
 // managed revision. User-max unlimited sends null (the gateway double-option
