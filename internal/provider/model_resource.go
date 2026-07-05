@@ -243,12 +243,68 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		ManagedBy:       ptrIf(plan.ManagedBy),
 	}
 	var out modelAPI
-	if err := r.client.do(ctx, "POST", "/api/v1/admin/models", nil, body, &out); err != nil {
+	err := r.client.do(ctx, "POST", "/api/v1/admin/models", nil, body, &out)
+	if isConflict(err) {
+		// ADOPT-ON-CONFLICT: a doc for this (provider, model_id) already
+		// exists on the gateway but is missing from Terraform state — the
+		// canonical way this happens is a state prune from a version-skewed
+		// refresh (e.g. provider v0.8.2 reading by doc id against a gateway
+		// that still resolved names only). These models are declared
+		// self-healing (managed_by=companygpt-terraform), so create adopts
+		// the existing doc and aligns it to the plan instead of failing.
+		adopted, aerr := r.adoptExistingModel(ctx, &plan, body)
+		if aerr != nil {
+			resp.Diagnostics.AddError("Create model failed",
+				fmt.Sprintf("gateway reports the model exists but adopting it failed: %s (original conflict: %s)", aerr, err))
+			return
+		}
+		out = *adopted
+	} else if err != nil {
 		resp.Diagnostics.AddError("Create model failed", err.Error())
 		return
 	}
 	r.apply(&plan, &out)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
+}
+
+// adoptExistingModel resolves the existing doc for the plan's
+// (provider_id, model_id) via the list endpoint and PUTs the planned
+// attributes onto it, returning the aligned doc.
+func (r *modelResource) adoptExistingModel(ctx context.Context, plan *modelResourceModel, body modelCreateBody) (*modelAPI, error) {
+	var list []modelAPI
+	if err := r.client.do(ctx, "GET", "/api/v1/admin/models", nil, nil, &list); err != nil {
+		return nil, fmt.Errorf("listing models: %w", err)
+	}
+	var match *modelAPI
+	for i := range list {
+		if list[i].ModelID == body.ModelID && list[i].ProviderID == body.ProviderID {
+			if match != nil {
+				return nil, fmt.Errorf("more than one doc for model %q under provider %q — clean up duplicates first", body.ModelID, body.ProviderID)
+			}
+			match = &list[i]
+		}
+	}
+	if match == nil {
+		return nil, fmt.Errorf("no doc for model %q under provider %q (the conflicting doc belongs to another provider — pick a different model_id or import that doc)", body.ModelID, body.ProviderID)
+	}
+	upd := modelUpdateBody{
+		DisplayName:     &body.DisplayName,
+		ProviderID:      &body.ProviderID,
+		ProviderModelID: &body.ProviderModelID,
+		DeploymentName:  body.DeploymentName,
+		InputMicros:     &body.InputMicros,
+		OutputMicros:    &body.OutputMicros,
+		CachedMicros:    &body.CachedMicros,
+		Enabled:         &body.Enabled,
+		IsDefault:       &body.IsDefault,
+		PriceRegion:     body.PriceRegion,
+		ManagedBy:       body.ManagedBy,
+	}
+	var out modelAPI
+	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+match.ID, nil, upd, &out); err != nil {
+		return nil, fmt.Errorf("aligning adopted model %s: %w", match.ID, err)
+	}
+	return &out, nil
 }
 
 // modelAdminPath returns the admin API path for a model, preferring the
@@ -285,6 +341,16 @@ func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	p, byName := modelAdminPath(state.ID, state.ModelID)
 	var out modelAPI
 	err := r.client.do(ctx, "GET", p, nil, nil, &out)
+	if isNotFound(err) && !byName {
+		// Version-skew guard: a gateway older than v0.16.16 resolves the
+		// {model_id} path segment by NAME only, so a by-doc-id read 404s
+		// even though the model exists. Retry by name before concluding the
+		// resource is gone — dropping it from state here caused create/409
+		// storms on the next apply.
+		nameP := "/api/v1/admin/models/" + state.ModelID.ValueString()
+		err = r.client.do(ctx, "GET", nameP, nil, nil, &out)
+		byName = true
+	}
 	if isNotFound(err) {
 		resp.State.RemoveResource(ctx)
 		return
