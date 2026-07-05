@@ -51,6 +51,21 @@ func int64Ptr(v types.Int64) *int64 {
 	return &x
 }
 
+// ambiguousModelRefDetail expands a gateway 409 ("model name exists under
+// multiple providers", gateway >= v0.16.16 resolves model routes doc-id-first
+// and rejects ambiguous names) into an actionable message; every other error
+// passes through unchanged. For resources that reference a model by the
+// user-supplied model_id without storing the doc id themselves
+// (fallback_chain, deployment_group, the model data source), the fix is to
+// reference the model's server doc id (aigateway_model.<name>.id) — the
+// gateway accepts it anywhere a model_id is expected.
+func ambiguousModelRefDetail(err error) string {
+	if isConflict(err) {
+		return "referenced model name is ambiguous across providers — set model_id to the model's server doc id (aigateway_model.<name>.id, model_<uuid>) instead of the name: " + err.Error()
+	}
+	return err.Error()
+}
+
 // boolPtr returns a pointer to the bool value, or nil when null/unknown.
 func boolPtr(v types.Bool) *bool {
 	if v.IsNull() || v.IsUnknown() {

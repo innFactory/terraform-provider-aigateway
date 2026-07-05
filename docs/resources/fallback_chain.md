@@ -26,4 +26,4 @@ resource "aigateway_fallback_chain" "gpt_5_4" {
 ### Required
 
 - `fallback_models` (List of String) Ordered list of model_ids to fall back to. Empty clears the chain.
-- `model_id` (String) The model whose fallback chain this manages.
+- `model_id` (String) The model whose fallback chain this manages. Accepts the caller-chosen model_id or the server doc id (model_<uuid>); use aigateway_model.<name>.id when the same model name exists under multiple providers.

@@ -44,7 +44,7 @@ func (d *modelDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, 
 		Attributes: map[string]schema.Attribute{
 			"model_id": schema.StringAttribute{
 				Required:    true,
-				Description: "The model id to look up.",
+				Description: "The model id to look up. Accepts the caller-chosen model_id or the server doc id (model_<uuid>); a name that exists under multiple providers is ambiguous and must be looked up by doc id.",
 			},
 			"id":                schema.StringAttribute{Computed: true, Description: "Server-assigned internal id."},
 			"display_name":      schema.StringAttribute{Computed: true},
@@ -74,7 +74,7 @@ func (d *modelDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 	}
 	var out modelAPI
 	if err := d.client.do(ctx, "GET", "/api/v1/admin/models/"+cfg.ModelID.ValueString(), nil, nil, &out); err != nil {
-		resp.Diagnostics.AddError("Read model failed", err.Error())
+		resp.Diagnostics.AddError("Read model failed", ambiguousModelRefDetail(err))
 		return
 	}
 	cfg.ID = types.StringValue(out.ID)

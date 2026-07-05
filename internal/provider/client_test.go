@@ -68,3 +68,25 @@ func TestClientOrgUnlimitedSerialisesZeroUserUnlimitedSerialisesNull(t *testing.
 		t.Errorf("marshal = %s, want %s", raw, want)
 	}
 }
+
+func TestClientMapsConflictStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"detail": "Model name 'gpt-4o' exists under multiple providers",
+		})
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "k", "test")
+	err := c.do(context.Background(), "GET", "/api/v1/admin/models/gpt-4o", nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !isConflict(err) {
+		t.Errorf("isConflict = false, want true for 409; err=%v", err)
+	}
+	if isNotFound(err) {
+		t.Errorf("409 must not read as not-found (that would silently drop the resource)")
+	}
+}

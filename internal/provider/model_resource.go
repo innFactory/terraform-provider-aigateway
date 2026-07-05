@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -51,7 +53,7 @@ func (r *modelResource) Metadata(_ context.Context, req resource.MetadataRequest
 
 func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "A model exposed by the gateway, bound to an aigateway_provider. Keyed on the caller-chosen model_id.",
+		Description: "A model exposed by the gateway, bound to an aigateway_provider. Identified by the caller-chosen model_id; the provider addresses the gateway by the server doc id (id, model_<uuid>) so the same model name may exist under multiple providers. Import by doc id, or by name when the name is unique.",
 		Attributes: map[string]schema.Attribute{
 			"model_id": schema.StringAttribute{
 				Required:      true,
@@ -136,7 +138,7 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			},
 			"id": schema.StringAttribute{
 				Computed:      true,
-				Description:   "Server-assigned internal id (model_<uuid>).",
+				Description:   "Server-assigned internal doc id (model_<uuid>). Read/Update/Delete address the gateway by this id, so duplicate model names across providers stay unambiguous.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 		},
@@ -249,20 +251,46 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
+// modelAdminPath returns the admin API path for a model, preferring the
+// server-assigned doc id (model_<uuid>) over the caller-chosen model_id NAME.
+// The same model name may exist under several providers (one catalog row per
+// provider); gateway >= v0.16.16 resolves `{model_id}` doc-id-first and
+// answers 409 for a by-name request that matches more than one model, so the
+// doc id is the only always-unambiguous handle. The name is used only when no
+// id is recorded in state yet (e.g. imported by name with an older provider
+// version and never refreshed). byName reports which handle was chosen so
+// callers can decorate a 409 with the re-import hint.
+func modelAdminPath(id, name types.String) (p string, byName bool) {
+	if s := id.ValueString(); !id.IsNull() && !id.IsUnknown() && s != "" {
+		return "/api/v1/admin/models/" + s, false
+	}
+	return "/api/v1/admin/models/" + name.ValueString(), true
+}
+
+// modelErrDetail expands a gateway 409 raised on a BY-NAME model request into
+// an actionable message; every other error passes through unchanged.
+func modelErrDetail(err error, byName bool) string {
+	if byName && isConflict(err) {
+		return "model name is ambiguous across providers — this provider version addresses models by their server doc id (model_<uuid>), but state has no id recorded; re-import the resource by doc id (terraform import <address> model_<uuid>) so operations are unambiguous: " + err.Error()
+	}
+	return err.Error()
+}
+
 func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state modelResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	p, byName := modelAdminPath(state.ID, state.ModelID)
 	var out modelAPI
-	err := r.client.do(ctx, "GET", "/api/v1/admin/models/"+state.ModelID.ValueString(), nil, nil, &out)
+	err := r.client.do(ctx, "GET", p, nil, nil, &out)
 	if isNotFound(err) {
 		resp.State.RemoveResource(ctx)
 		return
 	}
 	if err != nil {
-		resp.Diagnostics.AddError("Read model failed", err.Error())
+		resp.Diagnostics.AddError("Read model failed", modelErrDetail(err, byName))
 		return
 	}
 	r.apply(&state, &out)
@@ -270,8 +298,9 @@ func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp
 }
 
 func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan modelResourceModel
+	var plan, state modelResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -296,9 +325,13 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		PriceRegion:     ptrIf(plan.PriceRegion),
 		ManagedBy:       ptrIf(plan.ManagedBy),
 	}
+	// Address by the doc id from state (plan.ID may be unknown mid-plan);
+	// model_id is immutable (RequiresReplace), so the state's name is the
+	// correct fallback too.
+	p, byName := modelAdminPath(state.ID, plan.ModelID)
 	var out modelAPI
-	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+plan.ModelID.ValueString(), nil, body, &out); err != nil {
-		resp.Diagnostics.AddError("Update model failed", err.Error())
+	if err := r.client.do(ctx, "PUT", p, nil, body, &out); err != nil {
+		resp.Diagnostics.AddError("Update model failed", modelErrDetail(err, byName))
 		return
 	}
 	r.apply(&plan, &out)
@@ -311,13 +344,60 @@ func (r *modelResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.do(ctx, "DELETE", "/api/v1/admin/models/"+state.ModelID.ValueString(), nil, nil, nil); err != nil && !isNotFound(err) {
-		resp.Diagnostics.AddError("Delete model failed", err.Error())
+	p, byName := modelAdminPath(state.ID, state.ModelID)
+	if err := r.client.do(ctx, "DELETE", p, nil, nil, nil); err != nil && !isNotFound(err) {
+		resp.Diagnostics.AddError("Delete model failed", modelErrDetail(err, byName))
 	}
 }
 
+// ImportState accepts either handle:
+//   - the server doc id (model_<uuid>) — preferred, always unambiguous;
+//   - the caller-chosen model_id NAME — resolved to its doc id via the list
+//     endpoint, accepted only when exactly one model carries that name.
 func (r *modelResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	if strings.HasPrefix(req.ID, "model_") {
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
+		return
+	}
+	var list []modelAPI
+	if err := r.client.do(ctx, "GET", "/api/v1/admin/models", nil, nil, &list); err != nil {
+		resp.Diagnostics.AddError("Import model failed",
+			fmt.Sprintf("listing models to resolve name %q: %s", req.ID, err.Error()))
+		return
+	}
+	docID, err := resolveModelImportID(list, req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError("Import model failed", err.Error())
+		return
+	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("model_id"), req.ID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), docID)...)
+}
+
+// resolveModelImportID maps an import identifier that is a model NAME to the
+// unique server doc id. The name must match exactly one model; a name shared
+// across providers is ambiguous and must be imported by doc id instead.
+func resolveModelImportID(list []modelAPI, name string) (string, error) {
+	var matches []modelAPI
+	for i := range list {
+		if list[i].ModelID == name {
+			matches = append(matches, list[i])
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no model with model_id %q exists on the gateway", name)
+	case 1:
+		return matches[0].ID, nil
+	default:
+		ids := make([]string, len(matches))
+		for i := range matches {
+			ids[i] = fmt.Sprintf("%s (provider %s)", matches[i].ID, matches[i].ProviderID)
+		}
+		return "", fmt.Errorf(
+			"model name %q is ambiguous — it exists under multiple providers: %s; import by server doc id instead (terraform import <address> model_<uuid>)",
+			name, strings.Join(ids, ", "))
+	}
 }
 
 func (r *modelResource) apply(m *modelResourceModel, a *modelAPI) {

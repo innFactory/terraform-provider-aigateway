@@ -23,7 +23,7 @@ data "aigateway_model" "gpt_5_4" {
 
 ### Required
 
-- `model_id` (String) The model id to look up.
+- `model_id` (String) The model id to look up. Accepts the caller-chosen model_id or the server doc id (model_<uuid>); a name that exists under multiple providers is ambiguous and must be looked up by doc id.
 
 ### Read-Only
 
