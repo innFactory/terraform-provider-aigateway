@@ -39,6 +39,7 @@ type tenantSettingsResourceModel struct {
 	DefaultUserBudgetMicros    types.Int64  `tfsdk:"default_user_budget_microdollars"`
 	DefaultUserBudgetUnlimited types.Bool   `tfsdk:"default_user_budget_unlimited"`
 	DefaultCostCenterID        types.String `tfsdk:"default_cost_center_id"`
+	DefaultAccessGroupID       types.String `tfsdk:"default_access_group_id"`
 	ManagedRevision            types.String `tfsdk:"managed_revision"`
 }
 
@@ -83,6 +84,10 @@ func (r *tenantSettingsResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Optional:    true,
 				Description: "Default cost center (budget id) any unscoped key/token attributes to (gate 3 fallback). Empty = unscoped traffic skips gate 3.",
 			},
+			"default_access_group_id": schema.StringAttribute{
+				Optional:    true,
+				Description: "Default access group (aigateway_access_group id) applied to callers in no group — e.g. scopes /v1/models for trusted-header (LibreChat) users. Empty = allow-all when unset. Last-writer-wins: leaving it unset does not clear a dashboard-set value.",
+			},
 			"managed_revision": schema.StringAttribute{
 				Optional:      true,
 				Computed:      true,
@@ -114,6 +119,7 @@ type tenantPatchBody struct {
 	Currency                string   `json:"currency,omitempty"`
 	DefaultUserBudgetMicros *int64   `json:"defaultUserBudgetMicrodollars"`
 	DefaultCostCenterID     string   `json:"defaultCostCenterId,omitempty"`
+	DefaultAccessGroupID    string   `json:"defaultAccessGroupId,omitempty"`
 	ManagedRevision         string   `json:"managedRevision,omitempty"`
 }
 
@@ -125,6 +131,7 @@ type tenantAPI struct {
 	Currency                      string  `json:"currency"`
 	DefaultUserBudgetMicrodollars *int64  `json:"defaultUserBudgetMicrodollars"`
 	DefaultCostCenterID           string  `json:"defaultCostCenterId"`
+	DefaultAccessGroupID          string  `json:"defaultAccessGroupId"`
 	ManagedRevision               *string `json:"managedRevision"`
 }
 
@@ -133,6 +140,7 @@ func (r *tenantSettingsResource) write(ctx context.Context, plan *tenantSettings
 		DefaultAllowedModels: listOrNil(ctx, plan.DefaultAllowedModels),
 		Currency:             optString(plan.Currency),
 		DefaultCostCenterID:  optString(plan.DefaultCostCenterID),
+		DefaultAccessGroupID: optString(plan.DefaultAccessGroupID),
 		ManagedRevision:      time.Now().UTC().Format(time.RFC3339),
 	}
 	if plan.OrgBudgetUnlimited.ValueBool() {
@@ -175,8 +183,8 @@ func applyTenantRead(state *tenantSettingsResourceModel, out *tenantAPI) {
 			state.OrgBudgetMicros = types.Int64Value(*out.OrgBudget.MonthlyLimitMicrodollars)
 		}
 	}
-	// currency / default_user_budget_microdollars / default_cost_center_id:
-	// intentionally untouched (last-writer-wins).
+	// currency / default_user_budget_microdollars / default_cost_center_id /
+	// default_access_group_id: intentionally untouched (last-writer-wins).
 }
 
 func (r *tenantSettingsResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {

@@ -82,6 +82,8 @@ provider drives the live API). For an in-cluster/HTTP endpoint set
 | `aigateway_deployment_group` | load-balance one model across many provider deployments (multi-region/provider) with strategy + retry + cooldown | per `model_id` |
 | `aigateway_fallback_chain` | ordered fallback models tried after a model's deployments are exhausted | per `model_id` |
 | `aigateway_companygpt_integration` | the companyGPT integration policy: enables the trusted-header + direct-OIDC integration and maps Entra groups → gateway role / model allowlist | per `tenant_id` |
+| `aigateway_cost_center` | a cost center (budget) with optional daily/weekly/monthly caps and per-scope sub-limits | server `id` |
+| `aigateway_access_group` | an access group (admin-API "team"): model/provider visibility, budget, rate limit, API formats, Entra group mapping | server `id` |
 
 ### `aigateway_companygpt_integration`
 
