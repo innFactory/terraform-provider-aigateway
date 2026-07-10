@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -20,7 +21,7 @@ var (
 )
 
 type deploymentGroupResource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newDeploymentGroupResource() resource.Resource {
@@ -155,67 +156,7 @@ func (r *deploymentGroupResource) Configure(_ context.Context, req resource.Conf
 	if req.ProviderData == nil {
 		return
 	}
-	r.client = req.ProviderData.(*httpClient)
-}
-
-// ── wire types ───────────────────────────────────────────────────────────────
-
-type deploymentBody struct {
-	ProviderID      string  `json:"providerId"`
-	ProviderModelID string  `json:"providerModelId"`
-	DeploymentName  *string `json:"deploymentName,omitempty"`
-	Weight          *int64  `json:"weight,omitempty"`
-	Priority        *int64  `json:"priority,omitempty"`
-	Enabled         *bool   `json:"enabled,omitempty"`
-	TimeoutSeconds  *int64  `json:"timeoutSeconds,omitempty"`
-}
-
-type retryBody struct {
-	MaxRetries          *int64 `json:"maxRetries,omitempty"`
-	BackoffBaseMs       *int64 `json:"backoffBaseMs,omitempty"`
-	BackoffMaxMs        *int64 `json:"backoffMaxMs,omitempty"`
-	TotalTimeoutSeconds *int64 `json:"totalTimeoutSeconds,omitempty"`
-}
-
-type cooldownBody struct {
-	ConsecutiveErrorThreshold *int64 `json:"consecutiveErrorThreshold,omitempty"`
-	BaseCooldownSeconds       *int64 `json:"baseCooldownSeconds,omitempty"`
-	MaxCooldownSeconds        *int64 `json:"maxCooldownSeconds,omitempty"`
-	HealthyThresholdPercent   *int64 `json:"healthyThresholdPercent,omitempty"`
-	UnhealthyThresholdPercent *int64 `json:"unhealthyThresholdPercent,omitempty"`
-}
-
-type deploymentGroupBody struct {
-	Deployments    []deploymentBody `json:"deployments"`
-	Strategy       string           `json:"strategy,omitempty"`
-	RetryPolicy    *retryBody       `json:"retryPolicy,omitempty"`
-	CooldownConfig *cooldownBody    `json:"cooldownConfig,omitempty"`
-}
-
-type deploymentGroupAPI struct {
-	Deployments []struct {
-		ProviderID      string  `json:"providerId"`
-		ProviderModelID string  `json:"providerModelId"`
-		DeploymentName  *string `json:"deploymentName"`
-		Weight          int64   `json:"weight"`
-		Priority        int64   `json:"priority"`
-		Enabled         bool    `json:"enabled"`
-		TimeoutSeconds  *int64  `json:"timeoutSeconds"`
-	} `json:"deployments"`
-	Strategy    string `json:"strategy"`
-	RetryPolicy struct {
-		MaxRetries          int64 `json:"maxRetries"`
-		BackoffBaseMs       int64 `json:"backoffBaseMs"`
-		BackoffMaxMs        int64 `json:"backoffMaxMs"`
-		TotalTimeoutSeconds int64 `json:"totalTimeoutSeconds"`
-	} `json:"retryPolicy"`
-	CooldownConfig struct {
-		ConsecutiveErrorThreshold int64 `json:"consecutiveErrorThreshold"`
-		BaseCooldownSeconds       int64 `json:"baseCooldownSeconds"`
-		MaxCooldownSeconds        int64 `json:"maxCooldownSeconds"`
-		HealthyThresholdPercent   int64 `json:"healthyThresholdPercent"`
-		UnhealthyThresholdPercent int64 `json:"unhealthyThresholdPercent"`
-	} `json:"cooldownConfig"`
+	r.client = req.ProviderData.(*aigateway.Client)
 }
 
 func (m *deploymentGroupResourceModel) toBody() deploymentGroupBody {
@@ -291,12 +232,7 @@ func (m *deploymentGroupResourceModel) apply(a *deploymentGroupAPI) {
 }
 
 func (r *deploymentGroupResource) put(ctx context.Context, m *deploymentGroupResourceModel) (*deploymentGroupAPI, error) {
-	var out deploymentGroupAPI
-	err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+m.ModelID.ValueString()+"/deployment-group", nil, m.toBody(), &out)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return r.client.SetDeploymentGroup(ctx, m.ModelID.ValueString(), m.toBody())
 }
 
 func (r *deploymentGroupResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -321,8 +257,7 @@ func (r *deploymentGroupResource) Read(ctx context.Context, req resource.ReadReq
 		return
 	}
 	// GET returns the group object, or `null` when the model has no group.
-	var out *deploymentGroupAPI
-	err := r.client.do(ctx, "GET", "/api/v1/admin/models/"+state.ModelID.ValueString()+"/deployment-group", nil, nil, &out)
+	out, err := r.client.GetDeploymentGroup(ctx, state.ModelID.ValueString())
 	if isNotFound(err) {
 		resp.State.RemoveResource(ctx)
 		return
@@ -362,8 +297,7 @@ func (r *deploymentGroupResource) Delete(ctx context.Context, req resource.Delet
 		return
 	}
 	// An empty deployments list removes the group (reverts to the legacy 1:1 binding).
-	empty := deploymentGroupBody{Deployments: []deploymentBody{}}
-	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+state.ModelID.ValueString()+"/deployment-group", nil, empty, nil); err != nil && !isNotFound(err) {
+	if err := r.client.ClearDeploymentGroup(ctx, state.ModelID.ValueString()); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Clear deployment group failed", ambiguousModelRefDetail(err))
 	}
 }

@@ -6,8 +6,10 @@ toolchain go1.22.2
 
 require (
 	github.com/hashicorp/terraform-plugin-framework v1.13.0
-	github.com/hashicorp/terraform-plugin-log v0.9.0
+	github.com/innFactory/aigateway-go v0.0.0-00010101000000-000000000000
 )
+
+replace github.com/innFactory/aigateway-go => ../ai-gateway/sdk
 
 require (
 	github.com/fatih/color v1.13.0 // indirect
@@ -16,6 +18,7 @@ require (
 	github.com/hashicorp/go-plugin v1.6.2 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/hashicorp/terraform-plugin-go v0.25.0 // indirect
+	github.com/hashicorp/terraform-plugin-log v0.9.0 // indirect
 	github.com/hashicorp/terraform-registry-address v0.2.3 // indirect
 	github.com/hashicorp/terraform-svchost v0.1.1 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect

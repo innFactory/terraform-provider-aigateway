@@ -7,6 +7,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -15,7 +16,7 @@ var (
 )
 
 type providerDataSource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newProviderDataSource() datasource.DataSource {
@@ -67,7 +68,7 @@ func (d *providerDataSource) Configure(_ context.Context, req datasource.Configu
 	if req.ProviderData == nil {
 		return
 	}
-	d.client = req.ProviderData.(*httpClient)
+	d.client = req.ProviderData.(*aigateway.Client)
 }
 
 func (d *providerDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
@@ -83,8 +84,8 @@ func (d *providerDataSource) Read(ctx context.Context, req datasource.ReadReques
 		return
 	}
 
-	var list []providerAPI
-	if err := d.client.do(ctx, "GET", "/api/v1/admin/providers", nil, nil, &list); err != nil {
+	list, err := d.client.ListProviders(ctx)
+	if err != nil {
 		resp.Diagnostics.AddError("List providers failed", err.Error())
 		return
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -19,7 +20,7 @@ var (
 )
 
 type providerResource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newProviderResource() resource.Resource {
@@ -123,46 +124,7 @@ func (r *providerResource) Configure(_ context.Context, req resource.ConfigureRe
 	if req.ProviderData == nil {
 		return
 	}
-	r.client = req.ProviderData.(*httpClient)
-}
-
-type providerCreateBody struct {
-	Type         string  `json:"type"`
-	Name         string  `json:"name"`
-	Endpoint     string  `json:"endpoint"`
-	AuthType     string  `json:"authType"`
-	Credential   *string `json:"credential,omitempty"`
-	Region       *string `json:"region,omitempty"`
-	ProjectID    *string `json:"projectId,omitempty"`
-	APIVersion   *string `json:"apiVersion,omitempty"`
-	ManagedBy    *string `json:"managedBy,omitempty"`
-	InferenceGeo *string `json:"inferenceGeo,omitempty"`
-}
-
-type providerUpdateBody struct {
-	Name         *string `json:"name,omitempty"`
-	Endpoint     *string `json:"endpoint,omitempty"`
-	Credential   *string `json:"credential,omitempty"`
-	Region       *string `json:"region,omitempty"`
-	ProjectID    *string `json:"projectId,omitempty"`
-	APIVersion   *string `json:"apiVersion,omitempty"`
-	ManagedBy    *string `json:"managedBy,omitempty"`
-	InferenceGeo *string `json:"inferenceGeo,omitempty"`
-	Enabled      *bool   `json:"enabled,omitempty"`
-}
-
-type providerAPI struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"`
-	Name         string `json:"name"`
-	Endpoint     string `json:"endpoint"`
-	AuthType     string `json:"authType"`
-	Region       string `json:"region"`
-	ProjectID    string `json:"projectId"`
-	APIVersion   string `json:"apiVersion"`
-	ManagedBy    string `json:"managedBy"`
-	InferenceGeo string `json:"inferenceGeo"`
-	Enabled      bool   `json:"enabled"`
+	r.client = req.ProviderData.(*aigateway.Client)
 }
 
 func ptrIf(v types.String) *string {
@@ -195,12 +157,12 @@ func (r *providerResource) Create(ctx context.Context, req resource.CreateReques
 		ManagedBy:    ptrIf(plan.ManagedBy),
 		InferenceGeo: ptrIf(plan.InferenceGeo),
 	}
-	var out providerAPI
-	if err := r.client.do(ctx, "POST", "/api/v1/admin/providers", nil, body, &out); err != nil {
+	out, err := r.client.CreateProvider(ctx, body)
+	if err != nil {
 		resp.Diagnostics.AddError("Create provider failed", err.Error())
 		return
 	}
-	r.apply(&plan, &out)
+	r.apply(&plan, out)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
@@ -210,8 +172,8 @@ func (r *providerResource) Read(ctx context.Context, req resource.ReadRequest, r
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	var list []providerAPI
-	if err := r.client.do(ctx, "GET", "/api/v1/admin/providers", nil, nil, &list); err != nil {
+	list, err := r.client.ListProviders(ctx)
+	if err != nil {
 		resp.Diagnostics.AddError("Read provider failed", err.Error())
 		return
 	}
@@ -245,13 +207,13 @@ func (r *providerResource) Update(ctx context.Context, req resource.UpdateReques
 		InferenceGeo: ptrIf(plan.InferenceGeo),
 		Enabled:      &enabled,
 	}
-	var out providerAPI
-	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/providers/"+state.ID.ValueString(), nil, body, &out); err != nil {
+	out, err := r.client.UpdateProvider(ctx, state.ID.ValueString(), body)
+	if err != nil {
 		resp.Diagnostics.AddError("Update provider failed", err.Error())
 		return
 	}
 	plan.ID = state.ID
-	r.apply(&plan, &out)
+	r.apply(&plan, out)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
@@ -261,7 +223,7 @@ func (r *providerResource) Delete(ctx context.Context, req resource.DeleteReques
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.do(ctx, "DELETE", "/api/v1/admin/providers/"+state.ID.ValueString()+"?force=true", nil, nil, nil); err != nil && !isNotFound(err) {
+	if err := r.client.DeleteProvider(ctx, state.ID.ValueString()); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Delete provider failed", err.Error())
 	}
 }

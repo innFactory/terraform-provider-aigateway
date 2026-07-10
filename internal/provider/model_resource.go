@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -22,7 +23,7 @@ var (
 )
 
 type modelResource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newModelResource() resource.Resource {
@@ -149,56 +150,7 @@ func (r *modelResource) Configure(_ context.Context, req resource.ConfigureReque
 	if req.ProviderData == nil {
 		return
 	}
-	r.client = req.ProviderData.(*httpClient)
-}
-
-type modelCreateBody struct {
-	ModelID         string  `json:"modelId"`
-	DisplayName     string  `json:"displayName"`
-	ProviderID      string  `json:"providerId"`
-	ProviderModelID string  `json:"providerModelId"`
-	DeploymentName  *string `json:"deploymentName,omitempty"`
-	Capability      string  `json:"capability"`
-	ModelType       string  `json:"modelType"`
-	InputMicros     int64   `json:"inputPer1mTokensMicrodollars"`
-	OutputMicros    int64   `json:"outputPer1mTokensMicrodollars"`
-	CachedMicros    int64   `json:"cachedInputPer1mTokensMicrodollars"`
-	Enabled         bool    `json:"enabled"`
-	IsDefault       bool    `json:"isDefault"`
-	PriceRegion     *string `json:"priceRegion,omitempty"`
-	ManagedBy       *string `json:"managedBy,omitempty"`
-}
-
-type modelUpdateBody struct {
-	DisplayName     *string `json:"displayName,omitempty"`
-	ProviderID      *string `json:"providerId,omitempty"`
-	ProviderModelID *string `json:"providerModelId,omitempty"`
-	DeploymentName  *string `json:"deploymentName,omitempty"`
-	InputMicros     *int64  `json:"inputPer1mTokensMicrodollars,omitempty"`
-	OutputMicros    *int64  `json:"outputPer1mTokensMicrodollars,omitempty"`
-	CachedMicros    *int64  `json:"cachedInputPer1mTokensMicrodollars,omitempty"`
-	Enabled         *bool   `json:"enabled,omitempty"`
-	IsDefault       *bool   `json:"isDefault,omitempty"`
-	PriceRegion     *string `json:"priceRegion,omitempty"`
-	ManagedBy       *string `json:"managedBy,omitempty"`
-}
-
-type modelAPI struct {
-	ID              string  `json:"id"`
-	ModelID         string  `json:"modelId"`
-	DisplayName     string  `json:"displayName"`
-	ProviderID      string  `json:"providerId"`
-	ProviderModelID string  `json:"providerModelId"`
-	DeploymentName  string  `json:"deploymentName"`
-	Capability      string  `json:"capability"`
-	ModelType       string  `json:"modelType"`
-	InputMicros     int64   `json:"inputPer1mTokensMicrodollars"`
-	OutputMicros    int64   `json:"outputPer1mTokensMicrodollars"`
-	CachedMicros    int64   `json:"cachedInputPer1mTokensMicrodollars"`
-	Enabled         bool    `json:"enabled"`
-	IsDefault       bool    `json:"isDefault"`
-	PriceRegion     *string `json:"priceRegion"`
-	ManagedBy       string  `json:"managedBy"`
+	r.client = req.ProviderData.(*aigateway.Client)
 }
 
 func defStr(v types.String, def string) string {
@@ -242,8 +194,8 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		PriceRegion:     ptrIf(plan.PriceRegion),
 		ManagedBy:       ptrIf(plan.ManagedBy),
 	}
-	var out modelAPI
-	err := r.client.do(ctx, "POST", "/api/v1/admin/models", nil, body, &out)
+	created, err := r.client.CreateModel(ctx, body)
+	var out *modelAPI
 	if isConflict(err) {
 		// ADOPT-ON-CONFLICT: a doc for this (provider, model_id) already
 		// exists on the gateway but is missing from Terraform state — the
@@ -258,12 +210,14 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 				fmt.Sprintf("gateway reports the model exists but adopting it failed: %s (original conflict: %s)", aerr, err))
 			return
 		}
-		out = *adopted
+		out = adopted
 	} else if err != nil {
 		resp.Diagnostics.AddError("Create model failed", err.Error())
 		return
+	} else {
+		out = created
 	}
-	r.apply(&plan, &out)
+	r.apply(&plan, out)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
@@ -271,8 +225,8 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 // (provider_id, model_id) via the list endpoint and PUTs the planned
 // attributes onto it, returning the aligned doc.
 func (r *modelResource) adoptExistingModel(ctx context.Context, plan *modelResourceModel, body modelCreateBody) (*modelAPI, error) {
-	var list []modelAPI
-	if err := r.client.do(ctx, "GET", "/api/v1/admin/models", nil, nil, &list); err != nil {
+	list, err := r.client.ListModels(ctx)
+	if err != nil {
 		return nil, fmt.Errorf("listing models: %w", err)
 	}
 	var match *modelAPI
@@ -300,27 +254,28 @@ func (r *modelResource) adoptExistingModel(ctx context.Context, plan *modelResou
 		PriceRegion:     body.PriceRegion,
 		ManagedBy:       body.ManagedBy,
 	}
-	var out modelAPI
-	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+match.ID, nil, upd, &out); err != nil {
+	out, err := r.client.UpdateModel(ctx, match.ID, upd)
+	if err != nil {
 		return nil, fmt.Errorf("aligning adopted model %s: %w", match.ID, err)
 	}
-	return &out, nil
+	return out, nil
 }
 
-// modelAdminPath returns the admin API path for a model, preferring the
-// server-assigned doc id (model_<uuid>) over the caller-chosen model_id NAME.
-// The same model name may exist under several providers (one catalog row per
-// provider); gateway >= v0.16.16 resolves `{model_id}` doc-id-first and
-// answers 409 for a by-name request that matches more than one model, so the
-// doc id is the only always-unambiguous handle. The name is used only when no
-// id is recorded in state yet (e.g. imported by name with an older provider
-// version and never refreshed). byName reports which handle was chosen so
-// callers can decorate a 409 with the re-import hint.
-func modelAdminPath(id, name types.String) (p string, byName bool) {
+// modelRef returns the admin API handle for a model (the trailing
+// {model_id} path segment the SDK addresses), preferring the server-assigned
+// doc id (model_<uuid>) over the caller-chosen model_id NAME. The same model
+// name may exist under several providers (one catalog row per provider);
+// gateway >= v0.16.16 resolves `{model_id}` doc-id-first and answers 409 for a
+// by-name request that matches more than one model, so the doc id is the only
+// always-unambiguous handle. The name is used only when no id is recorded in
+// state yet (e.g. imported by name with an older provider version and never
+// refreshed). byName reports which handle was chosen so callers can decorate a
+// 409 with the re-import hint.
+func modelRef(id, name types.String) (ref string, byName bool) {
 	if s := id.ValueString(); !id.IsNull() && !id.IsUnknown() && s != "" {
-		return "/api/v1/admin/models/" + s, false
+		return s, false
 	}
-	return "/api/v1/admin/models/" + name.ValueString(), true
+	return name.ValueString(), true
 }
 
 // modelErrDetail expands a gateway 409 raised on a BY-NAME model request into
@@ -338,17 +293,15 @@ func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	p, byName := modelAdminPath(state.ID, state.ModelID)
-	var out modelAPI
-	err := r.client.do(ctx, "GET", p, nil, nil, &out)
+	ref, byName := modelRef(state.ID, state.ModelID)
+	out, err := r.client.GetModel(ctx, ref)
 	if isNotFound(err) && !byName {
 		// Version-skew guard: a gateway older than v0.16.16 resolves the
 		// {model_id} path segment by NAME only, so a by-doc-id read 404s
 		// even though the model exists. Retry by name before concluding the
 		// resource is gone — dropping it from state here caused create/409
 		// storms on the next apply.
-		nameP := "/api/v1/admin/models/" + state.ModelID.ValueString()
-		err = r.client.do(ctx, "GET", nameP, nil, nil, &out)
+		out, err = r.client.GetModel(ctx, state.ModelID.ValueString())
 		byName = true
 	}
 	if isNotFound(err) {
@@ -359,7 +312,7 @@ func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		resp.Diagnostics.AddError("Read model failed", modelErrDetail(err, byName))
 		return
 	}
-	r.apply(&state, &out)
+	r.apply(&state, out)
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 
@@ -394,13 +347,13 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	// Address by the doc id from state (plan.ID may be unknown mid-plan);
 	// model_id is immutable (RequiresReplace), so the state's name is the
 	// correct fallback too.
-	p, byName := modelAdminPath(state.ID, plan.ModelID)
-	var out modelAPI
-	if err := r.client.do(ctx, "PUT", p, nil, body, &out); err != nil {
+	ref, byName := modelRef(state.ID, plan.ModelID)
+	out, err := r.client.UpdateModel(ctx, ref, body)
+	if err != nil {
 		resp.Diagnostics.AddError("Update model failed", modelErrDetail(err, byName))
 		return
 	}
-	r.apply(&plan, &out)
+	r.apply(&plan, out)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
@@ -410,8 +363,8 @@ func (r *modelResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	p, byName := modelAdminPath(state.ID, state.ModelID)
-	if err := r.client.do(ctx, "DELETE", p, nil, nil, nil); err != nil && !isNotFound(err) {
+	ref, byName := modelRef(state.ID, state.ModelID)
+	if err := r.client.DeleteModel(ctx, ref); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Delete model failed", modelErrDetail(err, byName))
 	}
 }
@@ -425,8 +378,8 @@ func (r *modelResource) ImportState(ctx context.Context, req resource.ImportStat
 		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
 		return
 	}
-	var list []modelAPI
-	if err := r.client.do(ctx, "GET", "/api/v1/admin/models", nil, nil, &list); err != nil {
+	list, err := r.client.ListModels(ctx)
+	if err != nil {
 		resp.Diagnostics.AddError("Import model failed",
 			fmt.Sprintf("listing models to resolve name %q: %s", req.ID, err.Error()))
 		return

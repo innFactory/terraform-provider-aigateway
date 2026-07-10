@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -18,7 +19,7 @@ var (
 )
 
 type fallbackChainResource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newFallbackChainResource() resource.Resource {
@@ -56,19 +57,11 @@ func (r *fallbackChainResource) Configure(_ context.Context, req resource.Config
 	if req.ProviderData == nil {
 		return
 	}
-	r.client = req.ProviderData.(*httpClient)
-}
-
-type fallbackChainBody struct {
-	FallbackModels []string `json:"fallbackModels"`
+	r.client = req.ProviderData.(*aigateway.Client)
 }
 
 func (r *fallbackChainResource) write(ctx context.Context, m *fallbackChainResourceModel) error {
-	body := fallbackChainBody{FallbackModels: listOrNil(ctx, m.FallbackModels)}
-	if body.FallbackModels == nil {
-		body.FallbackModels = []string{}
-	}
-	return r.client.do(ctx, "PUT", "/api/v1/admin/models/"+m.ModelID.ValueString()+"/fallback", nil, body, nil)
+	return r.client.SetFallbackChain(ctx, m.ModelID.ValueString(), listOrNil(ctx, m.FallbackModels))
 }
 
 func (r *fallbackChainResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -90,8 +83,7 @@ func (r *fallbackChainResource) Read(ctx context.Context, req resource.ReadReque
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	var out []string
-	err := r.client.do(ctx, "GET", "/api/v1/admin/models/"+state.ModelID.ValueString()+"/fallback", nil, nil, &out)
+	out, err := r.client.GetFallbackChain(ctx, state.ModelID.ValueString())
 	if isNotFound(err) {
 		resp.State.RemoveResource(ctx)
 		return
@@ -124,8 +116,7 @@ func (r *fallbackChainResource) Delete(ctx context.Context, req resource.DeleteR
 		return
 	}
 	// Clear the chain (empty list).
-	body := fallbackChainBody{FallbackModels: []string{}}
-	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+state.ModelID.ValueString()+"/fallback", nil, body, nil); err != nil && !isNotFound(err) {
+	if err := r.client.SetFallbackChain(ctx, state.ModelID.ValueString(), []string{}); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Clear fallback chain failed", ambiguousModelRefDetail(err))
 	}
 }

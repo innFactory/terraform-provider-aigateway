@@ -21,7 +21,7 @@ func TestClientSendsBearerAndAdminHeader(t *testing.T) {
 	var out struct {
 		ID string `json:"id"`
 	}
-	if err := c.do(context.Background(), "GET", "/api/v1/admin/providers", nil, nil, &out); err != nil {
+	if err := c.Do(context.Background(), "GET", "/api/v1/admin/providers", nil, nil, &out); err != nil {
 		t.Fatalf("do: %v", err)
 	}
 	if gotAuth != "Bearer secret-key" {
@@ -46,7 +46,7 @@ func TestClientMapsErrorStatus(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "k", "test")
-	err := c.do(context.Background(), "GET", "/x", nil, nil, nil)
+	err := c.Do(context.Background(), "GET", "/x", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -79,7 +79,7 @@ func TestClientMapsConflictStatus(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL, "k", "test")
-	err := c.do(context.Background(), "GET", "/api/v1/admin/models/gpt-4o", nil, nil, nil)
+	err := c.Do(context.Background(), "GET", "/api/v1/admin/models/gpt-4o", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}

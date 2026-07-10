@@ -71,18 +71,18 @@ func TestDefBoolDefaultsOnNullAndUnknown(t *testing.T) {
 // it, falling back to the name only for legacy state without an id.
 
 func TestModelAdminPathPrefersDocID(t *testing.T) {
-	p, byName := modelAdminPath(types.StringValue("model_abc"), types.StringValue("gpt-4o"))
-	if p != "/api/v1/admin/models/model_abc" || byName {
-		t.Errorf("id set: got (%q, byName=%v), want doc-id path", p, byName)
+	ref, byName := modelRef(types.StringValue("model_abc"), types.StringValue("gpt-4o"))
+	if ref != "model_abc" || byName {
+		t.Errorf("id set: got (%q, byName=%v), want doc-id handle", ref, byName)
 	}
 	for name, id := range map[string]types.String{
 		"null":    types.StringNull(),
 		"unknown": types.StringUnknown(),
 		"empty":   types.StringValue(""),
 	} {
-		p, byName := modelAdminPath(id, types.StringValue("gpt-4o"))
-		if p != "/api/v1/admin/models/gpt-4o" || !byName {
-			t.Errorf("%s id: got (%q, byName=%v), want name fallback", name, p, byName)
+		ref, byName := modelRef(id, types.StringValue("gpt-4o"))
+		if ref != "gpt-4o" || !byName {
+			t.Errorf("%s id: got (%q, byName=%v), want name fallback", name, ref, byName)
 		}
 	}
 }

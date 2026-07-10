@@ -6,6 +6,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -14,7 +15,7 @@ var (
 )
 
 type modelDataSource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newModelDataSource() datasource.DataSource {
@@ -63,7 +64,7 @@ func (d *modelDataSource) Configure(_ context.Context, req datasource.ConfigureR
 	if req.ProviderData == nil {
 		return
 	}
-	d.client = req.ProviderData.(*httpClient)
+	d.client = req.ProviderData.(*aigateway.Client)
 }
 
 func (d *modelDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
@@ -72,8 +73,8 @@ func (d *modelDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	var out modelAPI
-	if err := d.client.do(ctx, "GET", "/api/v1/admin/models/"+cfg.ModelID.ValueString(), nil, nil, &out); err != nil {
+	out, err := d.client.GetModel(ctx, cfg.ModelID.ValueString())
+	if err != nil {
 		resp.Diagnostics.AddError("Read model failed", ambiguousModelRefDetail(err))
 		return
 	}

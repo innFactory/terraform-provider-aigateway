@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -18,7 +19,7 @@ var (
 )
 
 type apiKeyResource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newAPIKeyResource() resource.Resource {
@@ -99,36 +100,7 @@ func (r *apiKeyResource) Configure(_ context.Context, req resource.ConfigureRequ
 	if req.ProviderData == nil {
 		return
 	}
-	r.client = req.ProviderData.(*httpClient)
-}
-
-type apiKeyCreateBody struct {
-	Name             string   `json:"name"`
-	BudgetMicros     *int64   `json:"budgetMicrodollars,omitempty"`
-	AllowedModels    []string `json:"allowedModels,omitempty"`
-	AllowedProviders []string `json:"allowedProviders,omitempty"`
-	RateLimitRPM     *int64   `json:"rateLimitRpm,omitempty"`
-	CostCenterID     *string  `json:"costCenterId,omitempty"`
-}
-
-type apiKeyCreateResponse struct {
-	ID        string `json:"id"`
-	KeyPrefix string `json:"keyPrefix"`
-	Name      string `json:"name"`
-	Status    string `json:"status"`
-	RawKey    string `json:"rawKey"`
-}
-
-type apiKeyListEntry struct {
-	ID               string   `json:"id"`
-	KeyPrefix        string   `json:"keyPrefix"`
-	Name             string   `json:"name"`
-	Status           string   `json:"status"`
-	AllowedModels    []string `json:"allowedModels"`
-	AllowedProviders []string `json:"allowedProviders"`
-	BudgetMicros     *int64   `json:"budgetMicrodollars"`
-	RateLimitRPM     *int64   `json:"rateLimitRpm"`
-	BudgetID         *string  `json:"budgetId"`
+	r.client = req.ProviderData.(*aigateway.Client)
 }
 
 func listOrNil(ctx context.Context, l types.List) []string {
@@ -154,8 +126,8 @@ func (r *apiKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 		RateLimitRPM:     int64Ptr(plan.RateLimitRPM),
 		CostCenterID:     strPtr(plan.CostCenterID),
 	}
-	var out apiKeyCreateResponse
-	if err := r.client.do(ctx, "POST", "/api/v1/admin/keys", nil, body, &out); err != nil {
+	out, err := r.client.CreateKey(ctx, body)
+	if err != nil {
 		resp.Diagnostics.AddError("Create API key failed", err.Error())
 		return
 	}
@@ -172,8 +144,8 @@ func (r *apiKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	var list []apiKeyListEntry
-	if err := r.client.do(ctx, "GET", "/api/v1/admin/keys", nil, nil, &list); err != nil {
+	list, err := r.client.ListKeys(ctx)
+	if err != nil {
 		resp.Diagnostics.AddError("Read API key failed", err.Error())
 		return
 	}
@@ -213,15 +185,6 @@ func (r *apiKeyResource) Read(ctx context.Context, req resource.ReadRequest, res
 	resp.State.RemoveResource(ctx)
 }
 
-type apiKeyUpdateBody struct {
-	Name             *string  `json:"name,omitempty"`
-	BudgetMicros     *int64   `json:"budgetMicrodollars,omitempty"`
-	AllowedModels    []string `json:"allowedModels,omitempty"`
-	AllowedProviders []string `json:"allowedProviders,omitempty"`
-	RateLimitRPM     *int64   `json:"rateLimitRpm,omitempty"`
-	CostCenterID     *string  `json:"costCenterId,omitempty"`
-}
-
 func (r *apiKeyResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan, state apiKeyResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -238,7 +201,7 @@ func (r *apiKeyResource) Update(ctx context.Context, req resource.UpdateRequest,
 		RateLimitRPM:     int64Ptr(plan.RateLimitRPM),
 		CostCenterID:     strPtr(plan.CostCenterID),
 	}
-	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/keys/"+state.ID.ValueString(), nil, body, nil); err != nil {
+	if err := r.client.UpdateKey(ctx, state.ID.ValueString(), body); err != nil {
 		resp.Diagnostics.AddError("Update API key failed", err.Error())
 		return
 	}
@@ -256,7 +219,7 @@ func (r *apiKeyResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.do(ctx, "DELETE", "/api/v1/admin/keys/"+state.ID.ValueString(), nil, nil, nil); err != nil && !isNotFound(err) {
+	if err := r.client.DeleteKey(ctx, state.ID.ValueString()); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Delete API key failed", err.Error())
 	}
 }

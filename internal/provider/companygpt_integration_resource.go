@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -18,7 +19,7 @@ var (
 )
 
 type companygptIntegrationResource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newCompanygptIntegrationResource() resource.Resource {
@@ -216,48 +217,7 @@ func (r *companygptIntegrationResource) Configure(_ context.Context, req resourc
 	if req.ProviderData == nil {
 		return
 	}
-	r.client = req.ProviderData.(*httpClient)
-}
-
-// ── wire types (gateway UpsertIntegrationPolicyRequest, camelCase) ─────────────
-
-type roleMappingBody struct {
-	ExternalRole             string   `json:"externalRole"`
-	GatewayRole              *string  `json:"gatewayRole,omitempty"`
-	AllowedModels            []string `json:"allowedModels,omitempty"`
-	AllowedProviders         []string `json:"allowedProviders,omitempty"`
-	UserBudgetMicrodollars   *int64   `json:"userBudgetMicrodollars,omitempty"`
-	SharedBudgetID           *string  `json:"sharedBudgetId,omitempty"`
-	PerUserLimitMicrodollars *int64   `json:"perUserLimitMicrodollars,omitempty"`
-	AllowUnbudgeted          *bool    `json:"allowUnbudgeted,omitempty"`
-}
-
-type groupMappingBody struct {
-	ExternalGroupID          string   `json:"externalGroupId"`
-	GatewayRole              *string  `json:"gatewayRole,omitempty"`
-	AllowedModels            []string `json:"allowedModels,omitempty"`
-	AllowedProviders         []string `json:"allowedProviders,omitempty"`
-	TeamID                   *string  `json:"teamId,omitempty"`
-	UserBudgetMicrodollars   *int64   `json:"userBudgetMicrodollars,omitempty"`
-	SharedBudgetID           *string  `json:"sharedBudgetId,omitempty"`
-	PerUserLimitMicrodollars *int64   `json:"perUserLimitMicrodollars,omitempty"`
-	AllowUnbudgeted          *bool    `json:"allowUnbudgeted,omitempty"`
-}
-
-type integrationMetadataBody struct {
-	ManagedBy       string  `json:"managedBy"`
-	ManagedRevision *string `json:"managedRevision,omitempty"`
-}
-
-type upsertIntegrationPolicyBody struct {
-	Enabled               bool                     `json:"enabled"`
-	ExternalTenantIDs     []string                 `json:"externalTenantIds,omitempty"`
-	DefaultUserStatus     *string                  `json:"defaultUserStatus,omitempty"`
-	AllowUnbudgetedUsers  *bool                    `json:"allowUnbudgetedUsers,omitempty"`
-	DefaultSharedBudgetID *string                  `json:"defaultSharedBudgetId,omitempty"`
-	RoleMappings          []roleMappingBody        `json:"roleMappings,omitempty"`
-	GroupMappings         []groupMappingBody       `json:"groupMappings,omitempty"`
-	Metadata              *integrationMetadataBody `json:"metadata,omitempty"`
+	r.client = req.ProviderData.(*aigateway.Client)
 }
 
 const defaultManagedBy = "companygpt-terraform"
@@ -305,9 +265,7 @@ func (m *companygptIntegrationResourceModel) toBody(ctx context.Context) upsertI
 }
 
 func (r *companygptIntegrationResource) put(ctx context.Context, m *companygptIntegrationResourceModel) error {
-	return r.client.do(ctx, "PUT",
-		"/api/v1/admin/tenant/"+m.TenantID.ValueString()+"/companygpt-integration",
-		nil, m.toBody(ctx), nil)
+	return r.client.UpsertCompanygptIntegration(ctx, m.TenantID.ValueString(), m.toBody(ctx))
 }
 
 func (r *companygptIntegrationResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -367,9 +325,7 @@ func (r *companygptIntegrationResource) Delete(ctx context.Context, req resource
 		Enabled:  false,
 		Metadata: &integrationMetadataBody{ManagedBy: defaultManagedBy},
 	}
-	if err := r.client.do(ctx, "PUT",
-		"/api/v1/admin/tenant/"+state.TenantID.ValueString()+"/companygpt-integration",
-		nil, body, nil); err != nil && !isNotFound(err) {
+	if err := r.client.UpsertCompanygptIntegration(ctx, state.TenantID.ValueString(), body); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Disable companyGPT integration failed", err.Error())
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -17,7 +18,7 @@ var (
 )
 
 type tenantSettingsResource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newTenantSettingsResource() resource.Resource {
@@ -105,37 +106,7 @@ func (r *tenantSettingsResource) Configure(_ context.Context, req resource.Confi
 	if req.ProviderData == nil {
 		return
 	}
-	r.client = req.ProviderData.(*httpClient)
-}
-
-// tenantPatchBody always transmits the managed scalar fields. The gateway
-// interprets orgBudgetLimitMicrodollars == 0 as "unlimited" (clears the cap);
-// a positive value sets the cap. defaultUserBudgetMicrodollars is a
-// double-option field: null clears the cap (unlimited); a positive int64 sets
-// it. 0 would mean "block all users", so we must NOT use 0 as the clear
-// sentinel — use nil (→ JSON null) instead. managedRevision is the
-// last-writer-wins arbiter: the gateway only applies this write when the
-// revision is >= the stored one.
-type tenantPatchBody struct {
-	DefaultAllowedModels    []string `json:"defaultAllowedModels"`
-	OrgBudgetMicros         int64    `json:"orgBudgetLimitMicrodollars"`
-	Currency                string   `json:"currency,omitempty"`
-	DefaultUserBudgetMicros *int64   `json:"defaultUserBudgetMicrodollars"`
-	DefaultCostCenterID     string   `json:"defaultCostCenterId,omitempty"`
-	DefaultAccessGroupID    string   `json:"defaultAccessGroupId,omitempty"`
-	ManagedRevision         string   `json:"managedRevision,omitempty"`
-}
-
-type tenantAPI struct {
-	DefaultAllowedModels []string `json:"defaultAllowedModels"`
-	OrgBudget            *struct {
-		MonthlyLimitMicrodollars *int64 `json:"monthlyLimitMicrodollars"`
-	} `json:"orgBudget"`
-	Currency                      string  `json:"currency"`
-	DefaultUserBudgetMicrodollars *int64  `json:"defaultUserBudgetMicrodollars"`
-	DefaultCostCenterID           string  `json:"defaultCostCenterId"`
-	DefaultAccessGroupID          string  `json:"defaultAccessGroupId"`
-	ManagedRevision               *string `json:"managedRevision"`
+	r.client = req.ProviderData.(*aigateway.Client)
 }
 
 func (r *tenantSettingsResource) write(ctx context.Context, plan *tenantSettingsResourceModel, diags *diagSink) {
@@ -159,7 +130,7 @@ func (r *tenantSettingsResource) write(ctx context.Context, plan *tenantSettings
 	}
 	// Persist the revision we stamped so it round-trips into state.
 	plan.ManagedRevision = types.StringValue(body.ManagedRevision)
-	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/tenant", nil, body, nil); err != nil {
+	if err := r.client.UpdateTenant(ctx, body); err != nil {
 		diags.err("Update tenant settings failed", err.Error())
 	}
 }
@@ -210,15 +181,15 @@ func (r *tenantSettingsResource) Read(ctx context.Context, req resource.ReadRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	var out tenantAPI
-	if err := r.client.do(ctx, "GET", "/api/v1/admin/tenant", nil, nil, &out); err != nil {
+	out, err := r.client.GetTenant(ctx)
+	if err != nil {
 		resp.Diagnostics.AddError("Read tenant settings failed", err.Error())
 		return
 	}
 	if len(out.DefaultAllowedModels) > 0 {
 		state.DefaultAllowedModels = strList(ctx, &resp.Diagnostics, out.DefaultAllowedModels)
 	}
-	applyTenantRead(&state, &out)
+	applyTenantRead(&state, out)
 	state.ID = types.StringValue("tenant")
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }

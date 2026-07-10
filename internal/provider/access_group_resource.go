@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -32,7 +33,7 @@ var validAPIFormats = []string{"openai", "anthropic", "gemini"}
 // default_access_group_id) scopes what trusted-header (LibreChat) callers see
 // on /v1/models.
 type accessGroupResource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newAccessGroupResource() resource.Resource {
@@ -127,7 +128,7 @@ func (r *accessGroupResource) Configure(_ context.Context, req resource.Configur
 	if req.ProviderData == nil {
 		return
 	}
-	r.client = req.ProviderData.(*httpClient)
+	r.client = req.ProviderData.(*aigateway.Client)
 }
 
 // ValidateConfig checks supported_formats against the gateway's ApiFormat
@@ -156,66 +157,6 @@ func (r *accessGroupResource) ValidateConfig(ctx context.Context, req resource.V
 	}
 }
 
-// ── Wire types (camelCase, gateway src/routes/admin/teams.rs) ────────────────
-
-type accessGroupCreateBody struct {
-	Name                    string   `json:"name"`
-	Description             *string  `json:"description,omitempty"`
-	Icon                    *string  `json:"icon,omitempty"`
-	BudgetLimitMicrodollars *int64   `json:"budgetLimitMicrodollars,omitempty"`
-	RateLimitRpm            *int64   `json:"rateLimitRpm,omitempty"`
-	AllowedModels           []string `json:"allowedModels,omitempty"`
-	AllowedProviders        []string `json:"allowedProviders,omitempty"`
-	EntraGroupID            *string  `json:"entraGroupId,omitempty"`
-	SupportedFormats        []string `json:"supportedFormats,omitempty"`
-}
-
-// accessGroupUpdateBody: the gateway PATCH treats an absent/null field as
-// "leave unchanged" (there is no double-option clear path for teams), so
-// everything except supportedFormats and enabled keeps omitempty.
-// supportedFormats is NON-omitempty: an empty array is the gateway's
-// documented way to clear the format restriction (empty vec → None → all
-// formats), so a config that drops the attribute self-heals to unrestricted.
-// enabled is always sent (planned value is always known via the schema
-// default), so an out-of-band disable is reverted on the next apply.
-type accessGroupUpdateBody struct {
-	Name                    *string  `json:"name,omitempty"`
-	Description             *string  `json:"description,omitempty"`
-	Icon                    *string  `json:"icon,omitempty"`
-	BudgetLimitMicrodollars *int64   `json:"budgetLimitMicrodollars,omitempty"`
-	RateLimitRpm            *int64   `json:"rateLimitRpm,omitempty"`
-	AllowedModels           []string `json:"allowedModels,omitempty"`
-	AllowedProviders        []string `json:"allowedProviders,omitempty"`
-	EntraGroupID            *string  `json:"entraGroupId,omitempty"`
-	SupportedFormats        []string `json:"supportedFormats"`
-	Enabled                 *bool    `json:"enabled,omitempty"`
-}
-
-// accessGroupAPI mirrors the gateway TeamResponse (camelCase). Optional fields
-// are omitted server-side when None, hence pointers.
-type accessGroupAPI struct {
-	ID                      string   `json:"id"`
-	TenantID                string   `json:"tenantId"`
-	Name                    string   `json:"name"`
-	Description             *string  `json:"description"`
-	Icon                    *string  `json:"icon"`
-	BudgetLimitMicrodollars *int64   `json:"budgetLimitMicrodollars"`
-	RateLimitRpm            *int64   `json:"rateLimitRpm"`
-	AllowedModels           []string `json:"allowedModels"`
-	AllowedProviders        []string `json:"allowedProviders"`
-	EntraGroupID            *string  `json:"entraGroupId"`
-	SupportedFormats        []string `json:"supportedFormats"`
-	Enabled                 bool     `json:"enabled"`
-}
-
-const accessGroupBasePath = "/api/v1/admin/teams"
-
-// enabledPatchBody flips only the enabled flag (used after create, where the
-// create endpoint always sets enabled=true).
-type enabledPatchBody struct {
-	Enabled bool `json:"enabled"`
-}
-
 func (r *accessGroupResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan accessGroupResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -233,20 +174,21 @@ func (r *accessGroupResource) Create(ctx context.Context, req resource.CreateReq
 		EntraGroupID:            ptrIf(plan.EntraGroupID),
 		SupportedFormats:        listOrNil(ctx, plan.SupportedFormats),
 	}
-	var out accessGroupAPI
-	if err := r.client.do(ctx, "POST", accessGroupBasePath, nil, body, &out); err != nil {
+	out, err := r.client.CreateTeam(ctx, body)
+	if err != nil {
 		resp.Diagnostics.AddError("Create access group failed", err.Error())
 		return
 	}
 	// The create endpoint always creates enabled=true; honour enabled=false in
 	// config with a follow-up PATCH.
 	if !plan.Enabled.ValueBool() {
-		if err := r.client.do(ctx, "PATCH", accessGroupBasePath+"/"+out.ID, nil, enabledPatchBody{Enabled: false}, &out); err != nil {
+		out, err = r.client.SetTeamEnabled(ctx, out.ID, false)
+		if err != nil {
 			resp.Diagnostics.AddError("Disable access group after create failed", err.Error())
 			return
 		}
 	}
-	r.apply(&plan, &out, false)
+	r.apply(&plan, out, false)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
@@ -256,8 +198,8 @@ func (r *accessGroupResource) Read(ctx context.Context, req resource.ReadRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	var out accessGroupAPI
-	if err := r.client.do(ctx, "GET", accessGroupBasePath+"/"+state.ID.ValueString(), nil, nil, &out); err != nil {
+	out, err := r.client.GetTeam(ctx, state.ID.ValueString())
+	if err != nil {
 		if isNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
@@ -265,7 +207,7 @@ func (r *accessGroupResource) Read(ctx context.Context, req resource.ReadRequest
 		resp.Diagnostics.AddError("Read access group failed", err.Error())
 		return
 	}
-	r.apply(&state, &out, true)
+	r.apply(&state, out, true)
 	// Reflect the server lists on refresh so out-of-band changes surface as
 	// drift in `terraform plan` (in Create/Update the planned lists are kept —
 	// the gateway echoes what we sent).
@@ -311,13 +253,13 @@ func (r *accessGroupResource) Update(ctx context.Context, req resource.UpdateReq
 		SupportedFormats:        formats,
 		Enabled:                 &enabled,
 	}
-	var out accessGroupAPI
-	if err := r.client.do(ctx, "PATCH", accessGroupBasePath+"/"+state.ID.ValueString(), nil, body, &out); err != nil {
+	out, err := r.client.UpdateTeam(ctx, state.ID.ValueString(), body)
+	if err != nil {
 		resp.Diagnostics.AddError("Update access group failed", err.Error())
 		return
 	}
 	plan.ID = state.ID
-	r.apply(&plan, &out, false)
+	r.apply(&plan, out, false)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
@@ -327,7 +269,7 @@ func (r *accessGroupResource) Delete(ctx context.Context, req resource.DeleteReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.do(ctx, "DELETE", accessGroupBasePath+"/"+state.ID.ValueString(), nil, nil, nil); err != nil && !isNotFound(err) {
+	if err := r.client.DeleteTeam(ctx, state.ID.ValueString()); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Delete access group failed", err.Error())
 	}
 }

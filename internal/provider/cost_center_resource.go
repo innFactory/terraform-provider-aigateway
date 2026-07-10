@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	aigateway "github.com/innFactory/aigateway-go"
 )
 
 var (
@@ -18,7 +19,7 @@ var (
 )
 
 type costCenterResource struct {
-	client *httpClient
+	client *aigateway.Client
 }
 
 func newCostCenterResource() resource.Resource {
@@ -162,91 +163,7 @@ func (r *costCenterResource) Configure(_ context.Context, req resource.Configure
 	if req.ProviderData == nil {
 		return
 	}
-	r.client = req.ProviderData.(*httpClient)
-}
-
-type costCenterCreateBody struct {
-	Name            string   `json:"name"`
-	Currency        string   `json:"currency"`
-	Description     *string  `json:"description,omitempty"`
-	IsOrg           *bool    `json:"isOrg,omitempty"`
-	Mode            *string  `json:"mode,omitempty"`
-	MonthlyCap      *string  `json:"monthlyCap,omitempty"`
-	WeeklyCap       *string  `json:"weeklyCap,omitempty"`
-	DailyCap        *string  `json:"dailyCap,omitempty"`
-	AgentID         *string  `json:"agentId,omitempty"`
-	AutoAddNewUsers *bool    `json:"autoAddNewUsers,omitempty"`
-	FallbackChain   []string `json:"fallbackChain,omitempty"`
-}
-
-// costCenterUpdateBody: caps are NON-omitempty pointers so a nil pointer
-// serialises as explicit JSON null → the gateway double-option path CLEARS the
-// cap (back to unlimited). A non-nil pointer sets it. Name/description keep
-// omitempty (they are not clearable here). fallbackChain/autoAddNewUsers are
-// sent when present.
-type costCenterUpdateBody struct {
-	Name            *string  `json:"name,omitempty"`
-	Description     *string  `json:"description,omitempty"`
-	MonthlyCap      *string  `json:"monthlyCap"`
-	WeeklyCap       *string  `json:"weeklyCap"`
-	DailyCap        *string  `json:"dailyCap"`
-	AutoAddNewUsers *bool    `json:"autoAddNewUsers,omitempty"`
-	FallbackChain   []string `json:"fallbackChain,omitempty"`
-}
-
-type costCenterAPI struct {
-	ID              string        `json:"id"`
-	Name            string        `json:"name"`
-	Currency        string        `json:"currency"`
-	Description     string        `json:"description"`
-	Mode            string        `json:"mode"`
-	MonthlyCap      *string       `json:"monthlyCap"`
-	WeeklyCap       *string       `json:"weeklyCap"`
-	DailyCap        *string       `json:"dailyCap"`
-	AgentID         *string       `json:"agentId"`
-	AutoAddNewUsers bool          `json:"autoAddNewUsers"`
-	FallbackChain   []string      `json:"fallbackChain"`
-	IsOrg           bool          `json:"isOrg"`
-	SubLimits       []subLimitAPI `json:"subLimits"`
-}
-
-type subLimitScopeBody struct {
-	Type       string `json:"type"`
-	ProviderID string `json:"providerId,omitempty"`
-	ModelID    string `json:"modelId,omitempty"`
-	AliasName  string `json:"aliasName,omitempty"`
-	RouterID   string `json:"routerId,omitempty"`
-}
-
-type subLimitCreateBody struct {
-	Scope     subLimitScopeBody `json:"scope"`
-	CapAmount string            `json:"capAmount"`
-	DailyCap  *string           `json:"dailyCap,omitempty"`
-	WeeklyCap *string           `json:"weeklyCap,omitempty"`
-}
-
-// subLimitUpdateBody sends caps NON-omitempty so a nil pointer clears (explicit null),
-// matching the budget-cap clear semantics. capAmount is required (never cleared).
-type subLimitUpdateBody struct {
-	CapAmount *string `json:"capAmount,omitempty"`
-	DailyCap  *string `json:"dailyCap"`
-	WeeklyCap *string `json:"weeklyCap"`
-}
-
-type subLimitScopeAPI struct {
-	Type       string `json:"type"`
-	ProviderID string `json:"providerId"`
-	ModelID    string `json:"modelId"`
-	AliasName  string `json:"aliasName"`
-	RouterID   string `json:"routerId"`
-}
-
-type subLimitAPI struct {
-	ID        string           `json:"id"`
-	Scope     subLimitScopeAPI `json:"scope"`
-	CapAmount string           `json:"capAmount"`
-	DailyCap  *string          `json:"dailyCap"`
-	WeeklyCap *string          `json:"weeklyCap"`
+	r.client = req.ProviderData.(*aigateway.Client)
 }
 
 // toScopeBody maps the flat model scope fields onto the tagged wire scope.
@@ -284,15 +201,11 @@ func scopeKeyFromAPI(a *subLimitAPI) string {
 // update changed ones, and delete ones no longer desired. Matching is by
 // scopeKey (stable scope identity), independent of server-assigned ids.
 func (r *costCenterResource) reconcileSubLimits(ctx context.Context, budgetID string, desired []subLimitModel) error {
-	base := "/api/v1/admin/budgets/" + budgetID + "/sub-limits"
-
-	var current []subLimitAPI
-	if err := r.client.do(ctx, "GET", base, nil, nil, &current); err != nil {
+	current, err := r.client.ListSubLimits(ctx, budgetID)
+	if err != nil && !isNotFound(err) {
 		// Some gateways return the sub-limits only on the budget detail GET; if
 		// the dedicated list 404s, treat as empty (create-all path).
-		if !isNotFound(err) {
-			return err
-		}
+		return err
 	}
 	byKey := make(map[string]*subLimitAPI, len(current))
 	for i := range current {
@@ -311,7 +224,7 @@ func (r *costCenterResource) reconcileSubLimits(ctx context.Context, budgetID st
 				DailyCap:  ptrIf(d.DailyCap),
 				WeeklyCap: ptrIf(d.WeeklyCap),
 			}
-			if err := r.client.do(ctx, "PATCH", base+"/"+existing.ID, nil, body, nil); err != nil {
+			if err := r.client.UpdateSubLimit(ctx, budgetID, existing.ID, body); err != nil {
 				return err
 			}
 		} else {
@@ -321,7 +234,7 @@ func (r *costCenterResource) reconcileSubLimits(ctx context.Context, budgetID st
 				DailyCap:  ptrIf(d.DailyCap),
 				WeeklyCap: ptrIf(d.WeeklyCap),
 			}
-			if err := r.client.do(ctx, "POST", base, nil, body, nil); err != nil {
+			if err := r.client.CreateSubLimit(ctx, budgetID, body); err != nil {
 				return err
 			}
 		}
@@ -329,7 +242,7 @@ func (r *costCenterResource) reconcileSubLimits(ctx context.Context, budgetID st
 	// Delete any current sub-limit no longer desired.
 	for i := range current {
 		if _, ok := desiredKeys[scopeKeyFromAPI(&current[i])]; !ok {
-			if err := r.client.do(ctx, "DELETE", base+"/"+current[i].ID, nil, nil, nil); err != nil && !isNotFound(err) {
+			if err := r.client.DeleteSubLimit(ctx, budgetID, current[i].ID); err != nil && !isNotFound(err) {
 				return err
 			}
 		}
@@ -360,12 +273,12 @@ func (r *costCenterResource) Create(ctx context.Context, req resource.CreateRequ
 		AutoAddNewUsers: boolPtr(plan.AutoAddNewUsers),
 		FallbackChain:   listOrNil(ctx, plan.FallbackChain),
 	}
-	var out costCenterAPI
-	if err := r.client.do(ctx, "POST", "/api/v1/admin/budgets", nil, body, &out); err != nil {
+	out, err := r.client.CreateBudget(ctx, body)
+	if err != nil {
 		resp.Diagnostics.AddError("Create cost center failed", err.Error())
 		return
 	}
-	r.apply(&plan, &out, currency)
+	r.apply(&plan, out, currency)
 	if len(plan.SubLimits) > 0 {
 		if err := r.reconcileSubLimits(ctx, out.ID, plan.SubLimits); err != nil {
 			resp.Diagnostics.AddError("Reconcile cost center sub-limits failed", err.Error())
@@ -381,8 +294,8 @@ func (r *costCenterResource) Read(ctx context.Context, req resource.ReadRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	var out costCenterAPI
-	if err := r.client.do(ctx, "GET", "/api/v1/admin/budgets/"+state.ID.ValueString(), nil, nil, &out); err != nil {
+	out, err := r.client.GetBudget(ctx, state.ID.ValueString())
+	if err != nil {
 		if isNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
@@ -390,7 +303,7 @@ func (r *costCenterResource) Read(ctx context.Context, req resource.ReadRequest,
 		resp.Diagnostics.AddError("Read cost center failed", err.Error())
 		return
 	}
-	r.apply(&state, &out, optString(state.Currency))
+	r.apply(&state, out, optString(state.Currency))
 	// Reflect server sub-limits into state so out-of-band changes surface as
 	// drift in `terraform plan`. reconcileSubLimits on apply will self-heal any
 	// drift back to the desired configuration.
@@ -416,13 +329,13 @@ func (r *costCenterResource) Update(ctx context.Context, req resource.UpdateRequ
 		AutoAddNewUsers: boolPtr(plan.AutoAddNewUsers),
 		FallbackChain:   listOrNil(ctx, plan.FallbackChain),
 	}
-	var out costCenterAPI
-	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/budgets/"+state.ID.ValueString(), nil, body, &out); err != nil {
+	out, err := r.client.UpdateBudget(ctx, state.ID.ValueString(), body)
+	if err != nil {
 		resp.Diagnostics.AddError("Update cost center failed", err.Error())
 		return
 	}
 	plan.ID = state.ID
-	r.apply(&plan, &out, optString(plan.Currency))
+	r.apply(&plan, out, optString(plan.Currency))
 	if err := r.reconcileSubLimits(ctx, state.ID.ValueString(), plan.SubLimits); err != nil {
 		resp.Diagnostics.AddError("Reconcile cost center sub-limits failed", err.Error())
 		return
@@ -436,7 +349,7 @@ func (r *costCenterResource) Delete(ctx context.Context, req resource.DeleteRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.do(ctx, "DELETE", "/api/v1/admin/budgets/"+state.ID.ValueString(), nil, nil, nil); err != nil && !isNotFound(err) {
+	if err := r.client.DeleteBudget(ctx, state.ID.ValueString()); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Delete cost center failed", err.Error())
 	}
 }
