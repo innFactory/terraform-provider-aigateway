@@ -8,7 +8,7 @@ description: |-
 
 # aigateway_tenant_settings (Resource)
 
-Singleton tenant-wide settings: default allowed models, org budget cap, tenant currency, per-user budget max, default cost center and default access group. The currency, per-user max, default cost center and default access group fields are **last-writer-wins**: a dashboard edit is not surfaced as drift and will not be reverted by a no-op `terraform apply`.
+Singleton tenant-wide settings: default allowed models, org budget cap, tenant currency, per-user budget max, default cost center, default access group and the reseller cost-margins. The currency, per-user max, default cost center, default access group and cost-margin fields are **last-writer-wins**: a dashboard edit is not surfaced as drift and will not be reverted by a no-op `terraform apply`.
 
 ## Example Usage
 
@@ -32,12 +32,14 @@ resource "aigateway_tenant_settings" "this" {
 
 ### Optional
 
+- `azure_commission_percent` (Number) Reseller commission added on top of Azure provider cost when computing customer_cost (customer_cost = provider_cost × (1 + pct/100)). Set 0 so customer_cost == provider_cost (e.g. internal tenants). Omit to leave the gateway default (20) / a dashboard edit untouched — last-writer-wins.
 - `currency` (String) ISO 4217 tenant currency (e.g. EUR, USD). Last-writer-wins: a dashboard edit is not reverted by a no-op apply.
 - `default_access_group_id` (String) Default access group (aigateway_access_group id) applied to callers in no group — e.g. scopes /v1/models for trusted-header (LibreChat) users. Empty = allow-all when unset. Last-writer-wins: leaving it unset does not clear a dashboard-set value.
 - `default_allowed_models` (List of String) Models visible to all users / trusted-header (LibreChat) callers.
 - `default_cost_center_id` (String) Default cost center (budget id) any unscoped key/token attributes to (gate 3 fallback). Empty = unscoped traffic skips gate 3.
 - `default_user_budget_microdollars` (Number) Per-user global monthly cap in microdollars (gate 2). Ignored when default_user_budget_unlimited = true.
 - `default_user_budget_unlimited` (Boolean) When true, the per-user global max is unlimited (gateway clears the cap).
+- `external_margin_per_1m_tokens_microdollars` (Number) Flat margin per 1M tokens (microdollars) added to non-Azure provider cost when computing customer_cost (customer_cost = provider_cost + tokens × margin). Set 0 so customer_cost == provider_cost (e.g. internal tenants). Omit to leave the gateway default (25000) / a dashboard edit untouched — last-writer-wins.
 - `org_budget_limit_microdollars` (Number) Org monthly budget cap in microdollars. Ignored when org_budget_unlimited = true.
 - `org_budget_unlimited` (Boolean) When true, the org budget is set to unlimited (no cap).
 

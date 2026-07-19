@@ -29,16 +29,18 @@ func newTenantSettingsResource() resource.Resource {
 // the default allowed-model list, the org budget cap (null = unlimited), and
 // the optional currency / per-user max / default cost center (last-writer-wins).
 type tenantSettingsResourceModel struct {
-	ID                         types.String `tfsdk:"id"`
-	DefaultAllowedModels       types.List   `tfsdk:"default_allowed_models"`
-	OrgBudgetMicros            types.Int64  `tfsdk:"org_budget_limit_microdollars"`
-	OrgBudgetUnlimited         types.Bool   `tfsdk:"org_budget_unlimited"`
-	Currency                   types.String `tfsdk:"currency"`
-	DefaultUserBudgetMicros    types.Int64  `tfsdk:"default_user_budget_microdollars"`
-	DefaultUserBudgetUnlimited types.Bool   `tfsdk:"default_user_budget_unlimited"`
-	DefaultCostCenterID        types.String `tfsdk:"default_cost_center_id"`
-	DefaultAccessGroupID       types.String `tfsdk:"default_access_group_id"`
-	ManagedRevision            types.String `tfsdk:"managed_revision"`
+	ID                         types.String  `tfsdk:"id"`
+	DefaultAllowedModels       types.List    `tfsdk:"default_allowed_models"`
+	OrgBudgetMicros            types.Int64   `tfsdk:"org_budget_limit_microdollars"`
+	OrgBudgetUnlimited         types.Bool    `tfsdk:"org_budget_unlimited"`
+	Currency                   types.String  `tfsdk:"currency"`
+	DefaultUserBudgetMicros    types.Int64   `tfsdk:"default_user_budget_microdollars"`
+	DefaultUserBudgetUnlimited types.Bool    `tfsdk:"default_user_budget_unlimited"`
+	DefaultCostCenterID        types.String  `tfsdk:"default_cost_center_id"`
+	DefaultAccessGroupID       types.String  `tfsdk:"default_access_group_id"`
+	AzureCommissionPercent     types.Float64 `tfsdk:"azure_commission_percent"`
+	ExternalMarginMicros       types.Int64   `tfsdk:"external_margin_per_1m_tokens_microdollars"`
+	ManagedRevision            types.String  `tfsdk:"managed_revision"`
 }
 
 func (r *tenantSettingsResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -86,6 +88,14 @@ func (r *tenantSettingsResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Optional:    true,
 				Description: "Default access group (aigateway_access_group id) applied to callers in no group — e.g. scopes /v1/models for trusted-header (LibreChat) users. Empty = allow-all when unset. Last-writer-wins: leaving it unset does not clear a dashboard-set value.",
 			},
+			"azure_commission_percent": schema.Float64Attribute{
+				Optional:    true,
+				Description: "Reseller commission added on top of Azure provider cost when computing customer_cost (customer_cost = provider_cost × (1 + pct/100)). Set 0 so customer_cost == provider_cost (e.g. internal tenants). Omit to leave the gateway default (20) / a dashboard edit untouched — last-writer-wins.",
+			},
+			"external_margin_per_1m_tokens_microdollars": schema.Int64Attribute{
+				Optional:    true,
+				Description: "Flat margin per 1M tokens (microdollars) added to non-Azure provider cost when computing customer_cost (customer_cost = provider_cost + tokens × margin). Set 0 so customer_cost == provider_cost (e.g. internal tenants). Omit to leave the gateway default (25000) / a dashboard edit untouched — last-writer-wins.",
+			},
 			"managed_revision": schema.StringAttribute{
 				// Computed-only (provider-managed), NOT Optional, and deliberately
 				// WITHOUT UseStateForUnknown: write() stamps a fresh time.Now() on
@@ -123,7 +133,13 @@ type tenantPatchBody struct {
 	DefaultUserBudgetMicros *int64   `json:"defaultUserBudgetMicrodollars"`
 	DefaultCostCenterID     string   `json:"defaultCostCenterId,omitempty"`
 	DefaultAccessGroupID    string   `json:"defaultAccessGroupId,omitempty"`
-	ManagedRevision         string   `json:"managedRevision,omitempty"`
+	// Cost-margin knobs. Pointers with omitempty so an unset attribute is
+	// omitted from the PATCH (gateway keeps its default / last-writer-wins),
+	// while an explicit 0 is a non-nil pointer and IS sent — the intended way
+	// to make customer_cost == provider_cost for internal tenants.
+	AzureCommissionPercent *float64 `json:"azureCommissionPercent,omitempty"`
+	ExternalMarginMicros   *int64   `json:"externalMarginPer1mTokensMicrodollars,omitempty"`
+	ManagedRevision        string   `json:"managedRevision,omitempty"`
 }
 
 type tenantAPI struct {
@@ -156,6 +172,15 @@ func (r *tenantSettingsResource) write(ctx context.Context, plan *tenantSettings
 	} else {
 		v := plan.DefaultUserBudgetMicros.ValueInt64()
 		body.DefaultUserBudgetMicros = &v
+	}
+	// Cost-margin knobs: send only when explicitly configured (0 IS sent).
+	if !plan.AzureCommissionPercent.IsNull() && !plan.AzureCommissionPercent.IsUnknown() {
+		v := plan.AzureCommissionPercent.ValueFloat64()
+		body.AzureCommissionPercent = &v
+	}
+	if !plan.ExternalMarginMicros.IsNull() && !plan.ExternalMarginMicros.IsUnknown() {
+		v := plan.ExternalMarginMicros.ValueInt64()
+		body.ExternalMarginMicros = &v
 	}
 	// Persist the revision we stamped so it round-trips into state.
 	plan.ManagedRevision = types.StringValue(body.ManagedRevision)
