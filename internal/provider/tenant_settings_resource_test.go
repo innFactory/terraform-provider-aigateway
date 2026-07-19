@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -141,6 +142,48 @@ func TestTenantPatchBodyOmitsUnsetDefaultAccessGroup(t *testing.T) {
 	want := `{"defaultAllowedModels":["gpt-4o"],"orgBudgetLimitMicrodollars":0,"defaultUserBudgetMicrodollars":null,"managedRevision":"2026-06-21T10:00:00Z"}`
 	if got != want {
 		t.Errorf("patch body mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// Cost-margin knobs set to an explicit 0 MUST appear in the PATCH body (a 0
+// margin is meaningful: it makes customer_cost == provider_cost). omitempty on
+// a non-nil pointer keeps the key.
+func TestTenantPatchBodyMarginZeroIsSent(t *testing.T) {
+	pct := float64(0)
+	margin := int64(0)
+	body := tenantPatchBody{
+		DefaultAllowedModels:   []string{"gpt-4o"},
+		OrgBudgetMicros:        0,
+		AzureCommissionPercent: &pct,
+		ExternalMarginMicros:   &margin,
+		ManagedRevision:        "2026-06-21T10:00:00Z",
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	want := `{"defaultAllowedModels":["gpt-4o"],"orgBudgetLimitMicrodollars":0,"defaultUserBudgetMicrodollars":null,"azureCommissionPercent":0,"externalMarginPer1mTokensMicrodollars":0,"managedRevision":"2026-06-21T10:00:00Z"}`
+	if got != want {
+		t.Errorf("patch body mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// Unset cost-margin knobs (nil pointers) MUST be omitted so the gateway keeps
+// its default / a dashboard edit is not reverted (last-writer-wins).
+func TestTenantPatchBodyOmitsUnsetMargins(t *testing.T) {
+	body := tenantPatchBody{
+		DefaultAllowedModels: []string{"gpt-4o"},
+		OrgBudgetMicros:      0,
+		ManagedRevision:      "2026-06-21T10:00:00Z",
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	if strings.Contains(got, "azureCommissionPercent") || strings.Contains(got, "externalMarginPer1mTokensMicrodollars") {
+		t.Errorf("unset margins must be omitted, got: %s", got)
 	}
 }
 
