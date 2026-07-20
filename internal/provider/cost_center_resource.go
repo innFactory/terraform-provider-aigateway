@@ -200,9 +200,9 @@ type costCenterAPI struct {
 	Currency        string        `json:"currency"`
 	Description     string        `json:"description"`
 	Mode            string        `json:"mode"`
-	MonthlyCap      *string       `json:"monthlyCap"`
-	WeeklyCap       *string       `json:"weeklyCap"`
-	DailyCap        *string       `json:"dailyCap"`
+	MonthlyCap      *capString    `json:"monthlyCap"`
+	WeeklyCap       *capString    `json:"weeklyCap"`
+	DailyCap        *capString    `json:"dailyCap"`
 	AgentID         *string       `json:"agentId"`
 	AutoAddNewUsers bool          `json:"autoAddNewUsers"`
 	FallbackChain   []string      `json:"fallbackChain"`
@@ -244,9 +244,9 @@ type subLimitScopeAPI struct {
 type subLimitAPI struct {
 	ID        string           `json:"id"`
 	Scope     subLimitScopeAPI `json:"scope"`
-	CapAmount string           `json:"capAmount"`
-	DailyCap  *string          `json:"dailyCap"`
-	WeeklyCap *string          `json:"weeklyCap"`
+	CapAmount capString        `json:"capAmount"`
+	DailyCap  *capString       `json:"dailyCap"`
+	WeeklyCap *capString       `json:"weeklyCap"`
 }
 
 // toScopeBody maps the flat model scope fields onto the tagged wire scope.
@@ -453,7 +453,7 @@ func subLimitsFromAPI(apiList []subLimitAPI) []subLimitModel {
 	for _, a := range apiList {
 		m := subLimitModel{
 			ScopeType: types.StringValue(a.Scope.Type),
-			CapAmount: types.StringValue(a.CapAmount),
+			CapAmount: types.StringValue(a.CapAmount.String()),
 		}
 		switch a.Scope.Type {
 		case "alias":
@@ -466,10 +466,10 @@ func subLimitsFromAPI(apiList []subLimitAPI) []subLimitModel {
 			m.ScopeID = types.StringValue(a.Scope.ProviderID)
 		}
 		if a.DailyCap != nil {
-			m.DailyCap = types.StringValue(*a.DailyCap)
+			m.DailyCap = types.StringValue(a.DailyCap.String())
 		}
 		if a.WeeklyCap != nil {
-			m.WeeklyCap = types.StringValue(*a.WeeklyCap)
+			m.WeeklyCap = types.StringValue(a.WeeklyCap.String())
 		}
 		out = append(out, m)
 	}
@@ -508,13 +508,13 @@ func (r *costCenterResource) apply(m *costCenterResourceModel, a *costCenterAPI,
 	// Caps are Optional (not Computed): only reflect a server value when present,
 	// leave the planned/null value otherwise (mirrors the existing monthly_cap handling).
 	if a.MonthlyCap != nil && *a.MonthlyCap != "" {
-		m.MonthlyCap = types.StringValue(*a.MonthlyCap)
+		m.MonthlyCap = types.StringValue(a.MonthlyCap.String())
 	}
 	if a.WeeklyCap != nil && *a.WeeklyCap != "" {
-		m.WeeklyCap = types.StringValue(*a.WeeklyCap)
+		m.WeeklyCap = types.StringValue(a.WeeklyCap.String())
 	}
 	if a.DailyCap != nil && *a.DailyCap != "" {
-		m.DailyCap = types.StringValue(*a.DailyCap)
+		m.DailyCap = types.StringValue(a.DailyCap.String())
 	}
 	if a.AgentID != nil && *a.AgentID != "" {
 		m.AgentID = types.StringValue(*a.AgentID)
