@@ -423,9 +423,15 @@ func (r *costCenterResource) Update(ctx context.Context, req resource.UpdateRequ
 	}
 	plan.ID = state.ID
 	r.apply(&plan, &out, optString(plan.Currency))
-	if err := r.reconcileSubLimits(ctx, state.ID.ValueString(), plan.SubLimits); err != nil {
-		resp.Diagnostics.AddError("Reconcile cost center sub-limits failed", err.Error())
-		return
+	// Only reconcile sub-limits when this resource declares some (mirrors Create).
+	// An empty/absent `sub_limits` means "not Terraform-managed" — the sub-limits
+	// are owned by gateway-config.yaml (reconciled on boot), so we must NOT treat
+	// empty as "delete all" and clobber the config-driven caps.
+	if len(plan.SubLimits) > 0 {
+		if err := r.reconcileSubLimits(ctx, state.ID.ValueString(), plan.SubLimits); err != nil {
+			resp.Diagnostics.AddError("Reconcile cost center sub-limits failed", err.Error())
+			return
+		}
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }

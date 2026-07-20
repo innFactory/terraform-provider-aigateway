@@ -41,17 +41,14 @@ func TestTenantSettingsManagedRevisionIsComputedOnly(t *testing.T) {
 	}
 }
 
-// The PATCH body must carry currency, user-max, default cost center and a
-// managed revision. User-max unlimited sends null (the gateway double-option
-// clears the per-user cap); a set user-max sends the microdollar value.
-// Org-budget unlimited sends 0 (the gateway 0-sentinel convention).
+// A fully-managed PATCH body: org cap 0 (unlimited sentinel), a set per-user cap
+// (microdollar value), currency, default cost center, revision.
 func TestTenantPatchBodyMarshalsFull(t *testing.T) {
-	userBudget := int64(50000000)
 	body := tenantPatchBody{
 		DefaultAllowedModels:    []string{"gpt-5.4"},
-		OrgBudgetMicros:         0,
+		OrgBudgetMicros:         ptrInt64(0),
 		Currency:                "EUR",
-		DefaultUserBudgetMicros: &userBudget,
+		DefaultUserBudgetMicros: json.RawMessage("50000000"),
 		DefaultCostCenterID:     "budget_companygpt",
 		DefaultAccessGroupID:    "team_default",
 		ManagedRevision:         "2026-06-21T10:00:00Z",
@@ -67,16 +64,15 @@ func TestTenantPatchBodyMarshalsFull(t *testing.T) {
 	}
 }
 
-// TestTenantPatchBodyUserUnlimitedSerialisesNull verifies that setting
 // default_user_budget_unlimited=true emits "defaultUserBudgetMicrodollars":null
 // (not 0). The gateway's double-option field treats null as "clear the cap";
 // sending 0 would BLOCK all users (a zero-dollar per-user cap).
 func TestTenantPatchBodyUserUnlimitedSerialisesNull(t *testing.T) {
 	body := tenantPatchBody{
 		DefaultAllowedModels:    []string{"gpt-4o"},
-		OrgBudgetMicros:         0,
+		OrgBudgetMicros:         ptrInt64(0),
 		Currency:                "USD",
-		DefaultUserBudgetMicros: nil, // unlimited: nil → JSON null
+		DefaultUserBudgetMicros: json.RawMessage("null"), // unlimited: explicit null clears
 		ManagedRevision:         "2026-06-21T10:00:00Z",
 	}
 	raw, err := json.Marshal(body)
@@ -90,23 +86,52 @@ func TestTenantPatchBodyUserUnlimitedSerialisesNull(t *testing.T) {
 	}
 }
 
+// NEW (v0.9.2 config-driven budgets): when the tenant leaves org/user budget
+// UNSET (nil), both keys are OMITTED from the PATCH — the gateway then leaves
+// its (config.yaml-driven) values untouched instead of clearing them. This is
+// what lets budgets live entirely in gateway-config.yaml.
+func TestTenantPatchBodyOmitsUnsetBudgets(t *testing.T) {
+	body := tenantPatchBody{
+		DefaultAllowedModels:    []string{"gpt-4o"},
+		OrgBudgetMicros:         nil, // unset → omitted
+		DefaultUserBudgetMicros: nil, // unset → omitted
+		Currency:                "EUR",
+		ManagedRevision:         "2026-06-21T10:00:00Z",
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	if strings.Contains(got, "orgBudgetLimitMicrodollars") {
+		t.Errorf("unset org budget must be omitted, got: %s", got)
+	}
+	if strings.Contains(got, "defaultUserBudgetMicrodollars") {
+		t.Errorf("unset user budget must be omitted, got: %s", got)
+	}
+}
+
 // Read must NOT overwrite the configured mutable fields from the gateway
-// response (last-writer-wins: a dashboard edit must not be reverted). Only
-// the singleton id is reconciled.
+// response (last-writer-wins / config-driven: a dashboard or config.yaml edit
+// must not be reverted). applyTenantRead is now a no-op over these fields.
 func TestTenantSettingsReadDoesNotRevertMutableFields(t *testing.T) {
 	state := tenantSettingsResourceModel{
 		Currency:                types.StringValue("EUR"),
 		DefaultUserBudgetMicros: types.Int64Value(50000000),
 		DefaultCostCenterID:     types.StringValue("budget_companygpt"),
 		DefaultAccessGroupID:    types.StringValue("team_default"),
+		OrgBudgetMicros:         types.Int64Value(500000000),
 	}
-	// applyTenantRead simulates a gateway GET that reports DIFFERENT values (a
-	// dashboard edit). Read must leave the planned/state values untouched.
+	// A gateway GET reporting DIFFERENT values (a dashboard/config edit). Read
+	// must leave the planned/state values untouched.
 	out := tenantAPI{
 		Currency:                      "USD",
 		DefaultUserBudgetMicrodollars: ptrInt64(999),
 		DefaultCostCenterID:           "budget_other",
 		DefaultAccessGroupID:          "team_other",
+		OrgBudget: &struct {
+			MonthlyLimitMicrodollars *int64 `json:"monthlyLimitMicrodollars"`
+		}{MonthlyLimitMicrodollars: ptrInt64(1)},
 	}
 	applyTenantRead(&state, &out)
 	if state.Currency.ValueString() != "EUR" {
@@ -114,6 +139,9 @@ func TestTenantSettingsReadDoesNotRevertMutableFields(t *testing.T) {
 	}
 	if state.DefaultUserBudgetMicros.ValueInt64() != 50000000 {
 		t.Errorf("user max reverted to %d", state.DefaultUserBudgetMicros.ValueInt64())
+	}
+	if state.OrgBudgetMicros.ValueInt64() != 500000000 {
+		t.Errorf("org budget reverted to %d (config-driven must not drift)", state.OrgBudgetMicros.ValueInt64())
 	}
 	if state.DefaultCostCenterID.ValueString() != "budget_companygpt" {
 		t.Errorf("default cost center reverted to %q", state.DefaultCostCenterID.ValueString())
@@ -124,14 +152,12 @@ func TestTenantSettingsReadDoesNotRevertMutableFields(t *testing.T) {
 }
 
 // An unset default_access_group_id must be OMITTED from the PATCH body
-// (omitempty): the gateway's double-option field treats an absent key as
-// "leave unchanged", so an unset config never clears a dashboard-set value
-// (same nullability handling as defaultCostCenterId).
+// (omitempty): the gateway treats an absent key as "leave unchanged".
 func TestTenantPatchBodyOmitsUnsetDefaultAccessGroup(t *testing.T) {
 	body := tenantPatchBody{
 		DefaultAllowedModels:    []string{"gpt-4o"},
-		OrgBudgetMicros:         0,
-		DefaultUserBudgetMicros: nil,
+		OrgBudgetMicros:         ptrInt64(0),
+		DefaultUserBudgetMicros: json.RawMessage("null"),
 		ManagedRevision:         "2026-06-21T10:00:00Z",
 	}
 	raw, err := json.Marshal(body)
@@ -139,21 +165,19 @@ func TestTenantPatchBodyOmitsUnsetDefaultAccessGroup(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	got := string(raw)
-	want := `{"defaultAllowedModels":["gpt-4o"],"orgBudgetLimitMicrodollars":0,"defaultUserBudgetMicrodollars":null,"managedRevision":"2026-06-21T10:00:00Z"}`
-	if got != want {
-		t.Errorf("patch body mismatch\n got: %s\nwant: %s", got, want)
+	if strings.Contains(got, "defaultAccessGroupId") {
+		t.Errorf("unset default access group must be omitted, got: %s", got)
 	}
 }
 
 // Cost-margin knobs set to an explicit 0 MUST appear in the PATCH body (a 0
-// margin is meaningful: it makes customer_cost == provider_cost). omitempty on
-// a non-nil pointer keeps the key.
+// margin is meaningful: it makes customer_cost == provider_cost).
 func TestTenantPatchBodyMarginZeroIsSent(t *testing.T) {
 	pct := float64(0)
 	margin := int64(0)
 	body := tenantPatchBody{
 		DefaultAllowedModels:   []string{"gpt-4o"},
-		OrgBudgetMicros:        0,
+		OrgBudgetMicros:        ptrInt64(0),
 		AzureCommissionPercent: &pct,
 		ExternalMarginMicros:   &margin,
 		ManagedRevision:        "2026-06-21T10:00:00Z",
@@ -163,9 +187,9 @@ func TestTenantPatchBodyMarginZeroIsSent(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	got := string(raw)
-	want := `{"defaultAllowedModels":["gpt-4o"],"orgBudgetLimitMicrodollars":0,"defaultUserBudgetMicrodollars":null,"azureCommissionPercent":0,"externalMarginPer1mTokensMicrodollars":0,"managedRevision":"2026-06-21T10:00:00Z"}`
-	if got != want {
-		t.Errorf("patch body mismatch\n got: %s\nwant: %s", got, want)
+	if !strings.Contains(got, `"azureCommissionPercent":0`) ||
+		!strings.Contains(got, `"externalMarginPer1mTokensMicrodollars":0`) {
+		t.Errorf("explicit 0 margins must be sent, got: %s", got)
 	}
 }
 
@@ -174,7 +198,7 @@ func TestTenantPatchBodyMarginZeroIsSent(t *testing.T) {
 func TestTenantPatchBodyOmitsUnsetMargins(t *testing.T) {
 	body := tenantPatchBody{
 		DefaultAllowedModels: []string{"gpt-4o"},
-		OrgBudgetMicros:      0,
+		OrgBudgetMicros:      ptrInt64(0),
 		ManagedRevision:      "2026-06-21T10:00:00Z",
 	}
 	raw, err := json.Marshal(body)
