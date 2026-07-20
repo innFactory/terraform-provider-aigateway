@@ -69,7 +69,7 @@ func TestCostCenterApplyDefaultsCurrency(t *testing.T) {
 // reflect monthly_cap when present.
 func TestCostCenterApplyReflectsServerValues(t *testing.T) {
 	r := &costCenterResource{}
-	cap := "250.00"
+	cap := capString("250.00")
 	m := &costCenterResourceModel{
 		Currency:   types.StringValue("EUR"),
 		IsOrg:      types.BoolValue(true),
