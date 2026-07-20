@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -127,12 +129,18 @@ func (r *tenantSettingsResource) Configure(_ context.Context, req resource.Confi
 // last-writer-wins arbiter: the gateway only applies this write when the
 // revision is >= the stored one.
 type tenantPatchBody struct {
-	DefaultAllowedModels    []string `json:"defaultAllowedModels"`
-	OrgBudgetMicros         int64    `json:"orgBudgetLimitMicrodollars"`
-	Currency                string   `json:"currency,omitempty"`
-	DefaultUserBudgetMicros *int64   `json:"defaultUserBudgetMicrodollars"`
-	DefaultCostCenterID     string   `json:"defaultCostCenterId,omitempty"`
-	DefaultAccessGroupID    string   `json:"defaultAccessGroupId,omitempty"`
+	DefaultAllowedModels []string `json:"defaultAllowedModels"`
+	// Org/user budgets are OMITTED from the PATCH when the tenant leaves them
+	// unset (both the *_unlimited flag and the *_microdollars value null) — the
+	// gateway then leaves whatever it holds untouched (config.yaml-driven budgets,
+	// last-writer-wins). An explicit value or `*_unlimited = true` still writes.
+	//   org  : *int64 + omitempty — nil omits; &0 = unlimited; &N = cap.
+	//   user : RawMessage + omitempty — nil omits; `null` = unlimited (clear); `N` = cap.
+	OrgBudgetMicros         *int64          `json:"orgBudgetLimitMicrodollars,omitempty"`
+	Currency                string          `json:"currency,omitempty"`
+	DefaultUserBudgetMicros json.RawMessage `json:"defaultUserBudgetMicrodollars,omitempty"`
+	DefaultCostCenterID     string          `json:"defaultCostCenterId,omitempty"`
+	DefaultAccessGroupID    string          `json:"defaultAccessGroupId,omitempty"`
 	// Cost-margin knobs. Pointers with omitempty so an unset attribute is
 	// omitted from the PATCH (gateway keeps its default / last-writer-wins),
 	// while an explicit 0 is a non-nil pointer and IS sent — the intended way
@@ -162,17 +170,22 @@ func (r *tenantSettingsResource) write(ctx context.Context, plan *tenantSettings
 		DefaultAccessGroupID: optString(plan.DefaultAccessGroupID),
 		ManagedRevision:      time.Now().UTC().Format(time.RFC3339),
 	}
-	if plan.OrgBudgetUnlimited.ValueBool() {
-		body.OrgBudgetMicros = 0 // 0 → unlimited (gateway clears the cap)
-	} else {
-		body.OrgBudgetMicros = plan.OrgBudgetMicros.ValueInt64()
-	}
-	if plan.DefaultUserBudgetUnlimited.ValueBool() {
-		body.DefaultUserBudgetMicros = nil // nil → JSON null → gateway clears the per-user cap
-	} else {
-		v := plan.DefaultUserBudgetMicros.ValueInt64()
-		body.DefaultUserBudgetMicros = &v
-	}
+	// Org budget: send only when the tenant manages it (unlimited flag set, or a
+	// cap value set). Both null → omit → gateway keeps its (config-driven) value.
+	if !plan.OrgBudgetUnlimited.IsNull() && plan.OrgBudgetUnlimited.ValueBool() {
+		z := int64(0) // 0 → unlimited (gateway clears the cap)
+		body.OrgBudgetMicros = &z
+	} else if !plan.OrgBudgetMicros.IsNull() && !plan.OrgBudgetMicros.IsUnknown() {
+		v := plan.OrgBudgetMicros.ValueInt64()
+		body.OrgBudgetMicros = &v
+	} // else: leave nil → omitempty drops it → no change.
+	// Per-user budget: same tri-state via RawMessage (nil omits, `null` clears).
+	if !plan.DefaultUserBudgetUnlimited.IsNull() && plan.DefaultUserBudgetUnlimited.ValueBool() {
+		body.DefaultUserBudgetMicros = json.RawMessage("null")
+	} else if !plan.DefaultUserBudgetMicros.IsNull() && !plan.DefaultUserBudgetMicros.IsUnknown() {
+		body.DefaultUserBudgetMicros =
+			json.RawMessage(strconv.FormatInt(plan.DefaultUserBudgetMicros.ValueInt64(), 10))
+	} // else: leave nil → omitempty drops it → no change.
 	// Cost-margin knobs: send only when explicitly configured (0 IS sent).
 	if !plan.AzureCommissionPercent.IsNull() && !plan.AzureCommissionPercent.IsUnknown() {
 		v := plan.AzureCommissionPercent.ValueFloat64()
@@ -197,22 +210,17 @@ type diagSink struct {
 func (d *diagSink) err(summary, detail string) { d.add(summary, detail) }
 
 // applyTenantRead reconciles only the fields safe to refresh. The mutable,
-// dashboard-editable fields (currency, user-max, default cost center) are
-// deliberately NOT copied from the gateway response: last-writer-wins means a
-// dashboard edit must not surface as drift and get reverted by the next apply.
-// We keep only the org-budget reflection here (it is TF-owned via
-// org_budget_unlimited). default_allowed_models is reflected in Read itself,
-// where ctx/diags are available for the types.List conversion.
-func applyTenantRead(state *tenantSettingsResourceModel, out *tenantAPI) {
-	if out.OrgBudget != nil {
-		if out.OrgBudget.MonthlyLimitMicrodollars == nil {
-			state.OrgBudgetUnlimited = types.BoolValue(true)
-		} else {
-			state.OrgBudgetMicros = types.Int64Value(*out.OrgBudget.MonthlyLimitMicrodollars)
-		}
-	}
-	// currency / default_user_budget_microdollars / default_cost_center_id /
-	// default_access_group_id: intentionally untouched (last-writer-wins).
+// dashboard- AND config.yaml-editable fields (currency, org/user budgets,
+// default cost center) are deliberately NOT copied from the gateway response:
+// last-writer-wins means a dashboard or config.yaml edit must not surface as
+// drift and get reverted by the next apply. Org/user budgets in particular are
+// now config-driven for tenants that leave them unset (the write() side omits
+// them), so reflecting the server value here would produce perpetual drift.
+// default_allowed_models is reflected in Read itself, where ctx/diags are
+// available for the types.List conversion.
+func applyTenantRead(_ *tenantSettingsResourceModel, _ *tenantAPI) {
+	// org/user budgets, currency, default_cost_center_id, default_access_group_id:
+	// intentionally untouched (last-writer-wins / config-driven).
 }
 
 func (r *tenantSettingsResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {

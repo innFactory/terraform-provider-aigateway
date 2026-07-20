@@ -60,8 +60,14 @@ func TestClientOrgUnlimitedSerialisesZeroUserUnlimitedSerialisesNull(t *testing.
 	// treats 0 as "clear the org cap → unlimited"; null is not the sentinel here).
 	// user budget unlimited → defaultUserBudgetMicrodollars must be null (gateway
 	// double-option: null clears the cap; 0 would BLOCK all users).
-	body := tenantPatchBody{DefaultAllowedModels: []string{"gpt-4o"}, OrgBudgetMicros: 0}
-	// DefaultUserBudgetMicros left as nil (unlimited path).
+	// Under v0.9.2 "unlimited" is EXPLICIT (org → &0, user → RawMessage null);
+	// leaving a field nil now OMITS it (config-driven, no change).
+	zero := int64(0)
+	body := tenantPatchBody{
+		DefaultAllowedModels:    []string{"gpt-4o"},
+		OrgBudgetMicros:         &zero,
+		DefaultUserBudgetMicros: json.RawMessage("null"),
+	}
 	raw, _ := json.Marshal(body)
 	want := `{"defaultAllowedModels":["gpt-4o"],"orgBudgetLimitMicrodollars":0,"defaultUserBudgetMicrodollars":null}`
 	if string(raw) != want {
