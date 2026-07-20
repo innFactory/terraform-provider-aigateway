@@ -391,10 +391,14 @@ func (r *costCenterResource) Read(ctx context.Context, req resource.ReadRequest,
 		return
 	}
 	r.apply(&state, &out, optString(state.Currency))
-	// Reflect server sub-limits into state so out-of-band changes surface as
-	// drift in `terraform plan`. reconcileSubLimits on apply will self-heal any
-	// drift back to the desired configuration.
-	if out.SubLimits != nil {
+	// Reflect server sub-limits into state ONLY when THIS resource manages them
+	// (state already carries some). When state has none, the sub-limits are
+	// config-driven (owned by gateway-config.yaml, gateway >= v0.17.8) — reflecting
+	// the server's list would make every `terraform plan` show a spurious
+	// "remove sub_limits" (which Update then skips), i.e. PERPETUAL DRIFT. Leaving
+	// them unreflected keeps the resource stable; a config change re-reconciles on
+	// the gateway side. (TF-managed sub-limits still get drift detection.)
+	if len(state.SubLimits) > 0 && out.SubLimits != nil {
 		state.SubLimits = subLimitsFromAPI(out.SubLimits)
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
