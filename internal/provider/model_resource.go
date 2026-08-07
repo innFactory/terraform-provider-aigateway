@@ -44,6 +44,7 @@ type modelResourceModel struct {
 	IsDefault       types.Bool   `tfsdk:"is_default"`
 	PriceRegion     types.String `tfsdk:"price_region"`
 	ManagedBy       types.String `tfsdk:"managed_by"`
+	AllowUnpriced   types.Bool   `tfsdk:"allow_unpriced"`
 	ID              types.String `tfsdk:"id"`
 }
 
@@ -132,6 +133,17 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"region, falling back to the global price. Pin this for Azure DataZone " +
 					"deployments so cache/token rates match the EU data-zone price.",
 			},
+			"allow_unpriced": schema.BoolAttribute{
+				Optional: true,
+				Description: "Acknowledge creating an ENABLED model that carries no input/output " +
+					"price. The gateway refuses this by default (since v0.19.0): a $0 request " +
+					"is not merely unbilled, it never moves a budget counter, so the model is " +
+					"invisible to every cap. Set this only where pricing is attached AFTER " +
+					"creation — e.g. the update-pricing/confirm-pricing flow that pulls from " +
+					"ai-prices.eu — and expect the model to bill nothing until it runs. " +
+					"Create-only: the gateway does not store or return it, so it is never " +
+					"reflected back into state and changing it alone produces no diff.",
+			},
 			"managed_by": schema.StringAttribute{
 				Optional:    true,
 				Description: "Free-form marker stored on the gateway object (e.g. companygpt-terraform) so the UI can flag IaC-managed providers/models.",
@@ -167,6 +179,7 @@ type modelCreateBody struct {
 	IsDefault       bool    `json:"isDefault"`
 	PriceRegion     *string `json:"priceRegion,omitempty"`
 	ManagedBy       *string `json:"managedBy,omitempty"`
+	AllowUnpriced   bool    `json:"allowUnpriced,omitempty"`
 }
 
 type modelUpdateBody struct {
@@ -241,6 +254,7 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		IsDefault:       defBool(plan.IsDefault, false),
 		PriceRegion:     ptrIf(plan.PriceRegion),
 		ManagedBy:       ptrIf(plan.ManagedBy),
+		AllowUnpriced:   defBool(plan.AllowUnpriced, false),
 	}
 	var out modelAPI
 	err := r.client.do(ctx, "POST", "/api/v1/admin/models", nil, body, &out)
@@ -488,6 +502,10 @@ func (r *modelResource) apply(m *modelResourceModel, a *modelAPI) {
 	if a.PriceRegion != nil && *a.PriceRegion != "" {
 		m.PriceRegion = types.StringValue(*a.PriceRegion)
 	}
+	// allow_unpriced is deliberately absent here: it is a create-time
+	// acknowledgement, not model state. The gateway neither stores nor returns
+	// it, so touching it would null the configured value and produce a
+	// permanent diff.
 	// managed_by is Optional (not Computed): only reflect a server value when the
 	// response carries one, otherwise keep the planned/null value to avoid
 	// "inconsistent result" errors when unset. No else StringNull() here.
