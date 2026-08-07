@@ -35,6 +35,7 @@ resource "aigateway_model" "gpt_5_4_mini" {
 
 ### Optional
 
+- `allow_unpriced` (Boolean) Acknowledge creating an ENABLED model that carries no input/output price. The gateway refuses this by default (since v0.19.0): a $0 request is not merely unbilled, it never moves a budget counter, so the model is invisible to every cap. Set this only where pricing is attached AFTER creation — e.g. the update-pricing/confirm-pricing flow that pulls from ai-prices.eu — and expect the model to bill nothing until it runs. Create-only: the gateway does not store or return it, so it is never reflected back into state and changing it alone produces no diff.
 - `cached_input_per_1m_tokens_microdollars` (Number) Cached input token price per 1M tokens in microdollars.
 - `capability` (String) chat | embedding | image | audio. Defaults to chat.
 - `deployment_name` (String) Azure deployment name (required for azure_openai).

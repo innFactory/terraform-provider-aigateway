@@ -459,3 +459,60 @@ func TestModelCreateConflictOtherProviderErrors(t *testing.T) {
 		t.Fatal("conflict owned by another provider must error, not adopt")
 	}
 }
+
+// The gateway refuses to CREATE an enabled model with no input/output price
+// (since v0.19.0): a $0 request bills nothing AND never moves a budget counter,
+// so the model is invisible to every cap. `allow_unpriced` is the acknowledgement
+// that unblocks the create-then-price workflow (terraform creates at 0, the
+// update-pricing/confirm-pricing flow attaches the real ai-prices.eu rate after).
+// It has to reach the wire as `allowUnpriced`, which is the exact name the
+// gateway's CreateModelRequest deserializes.
+func TestModelCreateBodySendsAllowUnpriced(t *testing.T) {
+	body := modelCreateBody{
+		ModelID:       "gpt-5.6-luna",
+		Enabled:       true,
+		AllowUnpriced: true,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["allowUnpriced"] != true {
+		t.Errorf("allowUnpriced must be sent as true, got %v (payload: %s)", got["allowUnpriced"], raw)
+	}
+}
+
+// Default is off: an unset allow_unpriced must not silently opt every model out
+// of the price gate. `omitempty` drops the false, and the gateway's serde default
+// is false — so the field is simply absent and the gate applies.
+func TestModelCreateBodyOmitsAllowUnpricedWhenFalse(t *testing.T) {
+	raw, err := json.Marshal(modelCreateBody{ModelID: "gpt-5.4", Enabled: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "allowUnpriced") {
+		t.Errorf("an unset allow_unpriced must not appear on the wire, got: %s", raw)
+	}
+	if defBool(types.BoolNull(), false) {
+		t.Error("null allow_unpriced must default to false")
+	}
+}
+
+// allow_unpriced is a create-time acknowledgement, not model state: the gateway
+// neither stores nor returns it. apply() must therefore leave it exactly as
+// configured — nulling it here would produce a permanent diff on every refresh.
+func TestModelApplyLeavesAllowUnpricedUntouched(t *testing.T) {
+	r := &modelResource{}
+	m := &modelResourceModel{AllowUnpriced: types.BoolValue(true)}
+	a := &modelAPI{ID: "model_x", ModelID: "gpt-5.6-luna", Enabled: true}
+
+	r.apply(m, a)
+
+	if !m.AllowUnpriced.ValueBool() {
+		t.Error("allow_unpriced must survive a read; the server never echoes it")
+	}
+}
