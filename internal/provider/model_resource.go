@@ -98,19 +98,19 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"input_per_1m_tokens_microdollars": schema.Int64Attribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Input token price per 1M tokens in microdollars.",
+				Description:   "Input token price per 1M tokens in microdollars. Leave it unset to keep the price the gateway holds (e.g. one confirmed from ai-prices.eu) — unset values are omitted from update requests, never sent as 0.",
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 			"output_per_1m_tokens_microdollars": schema.Int64Attribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Output token price per 1M tokens in microdollars.",
+				Description:   "Output token price per 1M tokens in microdollars. Leave it unset to keep the price the gateway holds (e.g. one confirmed from ai-prices.eu) — unset values are omitted from update requests, never sent as 0.",
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 			"cached_input_per_1m_tokens_microdollars": schema.Int64Attribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Cached input token price per 1M tokens in microdollars.",
+				Description:   "Cached input token price per 1M tokens in microdollars. Leave it unset to keep the price the gateway holds (e.g. one confirmed from ai-prices.eu) — unset values are omitted from update requests, never sent as 0.",
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 			"enabled": schema.BoolAttribute{
@@ -141,7 +141,8 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"invisible to every cap. Set this only where pricing is attached AFTER " +
 					"creation — e.g. the update-pricing/confirm-pricing flow that pulls from " +
 					"ai-prices.eu — and expect the model to bill nothing until it runs. " +
-					"Create-only: the gateway does not store or return it, so it is never " +
+					"Forwarded on create, on update and on the adopt-on-conflict PUT alike — the gateway re-runs " +
+					"the same check whenever enabled is true. It is not stored or returned, so it is never " +
 					"reflected back into state and changing it alone produces no diff.",
 			},
 			"managed_by": schema.StringAttribute{
@@ -194,6 +195,10 @@ type modelUpdateBody struct {
 	IsDefault       *bool   `json:"isDefault,omitempty"`
 	PriceRegion     *string `json:"priceRegion,omitempty"`
 	ManagedBy       *string `json:"managedBy,omitempty"`
+	// Mirrors modelCreateBody.AllowUnpriced. The gateway refuses `enabled: true`
+	// on a model whose EFFECTIVE price is zero unless this flag is set — and it
+	// evaluates that on PUT as well as on POST (`UpdateModelRequest.allow_unpriced`).
+	AllowUnpriced *bool `json:"allowUnpriced,omitempty"`
 }
 
 type modelAPI struct {
@@ -230,6 +235,31 @@ func defBool(v types.Bool, def bool) bool {
 		return def
 	}
 	return v.ValueBool()
+}
+
+// int64PtrIf returns nil when v is unset (null OR unknown) so the JSON field is
+// omitted and the gateway KEEPS its stored value. The price attributes are
+// Optional+Computed: an unset config plans as unknown, and ValueInt64() on
+// that is 0 — sending that 0 on PUT silently wiped prices the operator had
+// confirmed from ai-prices.eu and, combined with `enabled: true`, tripped the
+// gateway's "cannot be enabled with no price" guard (seen 2026-09-03 while
+// adopting a discovery-imported gemini-3.8-flash row).
+func int64PtrIf(v types.Int64) *int64 {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
+	}
+	n := v.ValueInt64()
+	return &n
+}
+
+// boolPtrIfTrue returns a pointer to true when v is set and true, else nil —
+// for flags the API treats as "absent == false" (allowUnpriced).
+func boolPtrIfTrue(v types.Bool) *bool {
+	if v.IsNull() || v.IsUnknown() || !v.ValueBool() {
+		return nil
+	}
+	t := true
+	return &t
 }
 
 func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -301,18 +331,23 @@ func (r *modelResource) adoptExistingModel(ctx context.Context, plan *modelResou
 	if match == nil {
 		return nil, fmt.Errorf("no doc for model %q under provider %q (the conflicting doc belongs to another provider — pick a different model_id or import that doc)", body.ModelID, body.ProviderID)
 	}
+	// Align the adopted doc to the plan — but only the attributes the plan
+	// actually sets. Prices left unset in config must NOT be sent (the doc may
+	// already carry a confirmed price), and allow_unpriced has to ride along
+	// because the gateway re-checks "enabled without any price" on PUT.
 	upd := modelUpdateBody{
 		DisplayName:     &body.DisplayName,
 		ProviderID:      &body.ProviderID,
 		ProviderModelID: &body.ProviderModelID,
 		DeploymentName:  body.DeploymentName,
-		InputMicros:     &body.InputMicros,
-		OutputMicros:    &body.OutputMicros,
-		CachedMicros:    &body.CachedMicros,
+		InputMicros:     int64PtrIf(plan.InputMicros),
+		OutputMicros:    int64PtrIf(plan.OutputMicros),
+		CachedMicros:    int64PtrIf(plan.CachedMicros),
 		Enabled:         &body.Enabled,
 		IsDefault:       &body.IsDefault,
 		PriceRegion:     body.PriceRegion,
 		ManagedBy:       body.ManagedBy,
+		AllowUnpriced:   boolPtrIfTrue(plan.AllowUnpriced),
 	}
 	var out modelAPI
 	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+match.ID, nil, upd, &out); err != nil {
@@ -387,23 +422,25 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	dn := plan.DisplayName.ValueString()
 	pid := plan.ProviderID.ValueString()
 	pmid := plan.ProviderModelID.ValueString()
-	in := plan.InputMicros.ValueInt64()
-	out64 := plan.OutputMicros.ValueInt64()
-	cached := plan.CachedMicros.ValueInt64()
 	enabled := defBool(plan.Enabled, true)
 	isDefault := defBool(plan.IsDefault, false)
+	// Prices are Optional+Computed: unset in config ⇒ omitted here, so a
+	// plain re-apply never zeroes a price confirmed out-of-band (ai-prices.eu
+	// update-pricing/confirm-pricing). allow_unpriced is forwarded because the
+	// gateway applies the same "enabled needs a price" guard on PUT.
 	body := modelUpdateBody{
 		DisplayName:     &dn,
 		ProviderID:      &pid,
 		ProviderModelID: &pmid,
 		DeploymentName:  ptrIf(plan.DeploymentName),
-		InputMicros:     &in,
-		OutputMicros:    &out64,
-		CachedMicros:    &cached,
+		InputMicros:     int64PtrIf(plan.InputMicros),
+		OutputMicros:    int64PtrIf(plan.OutputMicros),
+		CachedMicros:    int64PtrIf(plan.CachedMicros),
 		Enabled:         &enabled,
 		IsDefault:       &isDefault,
 		PriceRegion:     ptrIf(plan.PriceRegion),
 		ManagedBy:       ptrIf(plan.ManagedBy),
+		AllowUnpriced:   boolPtrIfTrue(plan.AllowUnpriced),
 	}
 	// Address by the doc id from state (plan.ID may be unknown mid-plan);
 	// model_id is immutable (RequiresReplace), so the state's name is the

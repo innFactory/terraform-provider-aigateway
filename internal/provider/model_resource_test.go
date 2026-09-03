@@ -516,3 +516,157 @@ func TestModelApplyLeavesAllowUnpricedUntouched(t *testing.T) {
 		t.Error("allow_unpriced must survive a read; the server never echoes it")
 	}
 }
+
+// ── Prices unset in config must not be sent on PUT; allow_unpriced must ride along ──
+//
+// Regression for the 2026-09-03 adopt failure: the gateway had imported
+// gemini-3.8-flash via model discovery (unmanaged, disabled, priced later via
+// confirm-pricing). Terraform's create hit 409, adopt-on-conflict PUT the plan's
+// zero prices + enabled=true without allowUnpriced → 400 "cannot be enabled with
+// no price at all", and the confirmed price would have been wiped on success.
+
+func decodeBody(t *testing.T, r *http.Request) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	return m
+}
+
+func assertPriceFieldsAbsent(t *testing.T, body map[string]any) {
+	t.Helper()
+	for _, k := range []string{"inputPer1mTokensMicrodollars", "outputPer1mTokensMicrodollars", "cachedInputPer1mTokensMicrodollars"} {
+		if _, ok := body[k]; ok {
+			t.Errorf("PUT body must omit %s when the plan leaves it unset, got %v", k, body[k])
+		}
+	}
+}
+
+func TestModelUpdateOmitsUnsetPricesAndForwardsAllowUnpriced(t *testing.T) {
+	var put map[string]any
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == "PUT" {
+			put = decodeBody(t, req)
+		}
+		_ = json.NewEncoder(w).Encode(modelAPI{
+			ID: "model_abc", ModelID: "gemini-3.8-flash", DisplayName: "gemini-3.8-flash",
+			ProviderID: "provider_tf", ProviderModelID: "gemini-3.8-flash",
+			Capability: "chat", ModelType: "chat", Enabled: true,
+			InputMicros: 750000, OutputMicros: 3750000,
+		})
+	})
+	m := modelResourceModel{
+		ID:              types.StringValue("model_abc"),
+		ModelID:         types.StringValue("gemini-3.8-flash"),
+		DisplayName:     types.StringValue("gemini-3.8-flash"),
+		ProviderID:      types.StringValue("provider_tf"),
+		ProviderModelID: types.StringValue("gemini-3.8-flash"),
+		AllowUnpriced:   types.BoolValue(true),
+		InputMicros:     types.Int64Unknown(), // Optional+Computed, unset in config
+		OutputMicros:    types.Int64Unknown(),
+		CachedMicros:    types.Int64Null(),
+	}
+	resp := &resource.UpdateResponse{State: mustModelState(t, m)}
+	r.Update(context.Background(), resource.UpdateRequest{Plan: mustModelPlan(t, m), State: mustModelState(t, m)}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("update: %v", resp.Diagnostics)
+	}
+	if put == nil {
+		t.Fatal("no PUT captured")
+	}
+	assertPriceFieldsAbsent(t, put)
+	if v, ok := put["allowUnpriced"]; !ok || v != true {
+		t.Errorf("PUT body must carry allowUnpriced=true, got %v", put["allowUnpriced"])
+	}
+	if v, ok := put["enabled"]; !ok || v != true {
+		t.Errorf("PUT body must carry enabled=true, got %v", put["enabled"])
+	}
+}
+
+func TestModelUpdateSendsExplicitPrices(t *testing.T) {
+	var put map[string]any
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == "PUT" {
+			put = decodeBody(t, req)
+		}
+		_ = json.NewEncoder(w).Encode(modelAPI{ID: "model_abc", ModelID: "m", ProviderID: "p", ProviderModelID: "m", Capability: "chat", ModelType: "chat", Enabled: true, InputMicros: 5, OutputMicros: 7})
+	})
+	m := modelResourceModel{
+		ID: types.StringValue("model_abc"), ModelID: types.StringValue("m"), DisplayName: types.StringValue("m"),
+		ProviderID: types.StringValue("p"), ProviderModelID: types.StringValue("m"),
+		InputMicros: types.Int64Value(5), OutputMicros: types.Int64Value(7),
+	}
+	resp := &resource.UpdateResponse{State: mustModelState(t, m)}
+	r.Update(context.Background(), resource.UpdateRequest{Plan: mustModelPlan(t, m), State: mustModelState(t, m)}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("update: %v", resp.Diagnostics)
+	}
+	if put["inputPer1mTokensMicrodollars"] != float64(5) || put["outputPer1mTokensMicrodollars"] != float64(7) {
+		t.Errorf("explicit prices must be sent verbatim, got in=%v out=%v", put["inputPer1mTokensMicrodollars"], put["outputPer1mTokensMicrodollars"])
+	}
+	if _, ok := put["allowUnpriced"]; ok {
+		t.Errorf("allowUnpriced must be omitted when unset, got %v", put["allowUnpriced"])
+	}
+}
+
+func TestModelCreateAdoptsOnConflictWithoutWipingPrice(t *testing.T) {
+	var put map[string]any
+	var putPath string
+	existing := modelAPI{
+		ID: "model_d0da", ModelID: "gemini-3.8-flash", DisplayName: "gemini-3.8-flash",
+		ProviderID: "provider_b67", ProviderModelID: "gemini-3.8-flash",
+		Capability: "chat", ModelType: "chat", Enabled: false,
+		InputMicros: 750000, OutputMicros: 3750000,
+	}
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case req.Method == "POST":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error_code":"E4090","detail":"Conflict: Model already exists for provider provider_b67: gemini-3.8-flash"}`))
+		case req.Method == "GET":
+			_ = json.NewEncoder(w).Encode([]modelAPI{existing})
+		case req.Method == "PUT":
+			putPath = req.URL.Path
+			put = decodeBody(t, req)
+			adopted := existing
+			adopted.Enabled = true
+			_ = json.NewEncoder(w).Encode(adopted)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	m := modelResourceModel{
+		ModelID:         types.StringValue("gemini-3.8-flash"),
+		DisplayName:     types.StringValue("gemini-3.8-flash"),
+		ProviderID:      types.StringValue("provider_b67"),
+		ProviderModelID: types.StringValue("gemini-3.8-flash"),
+		Capability:      types.StringValue("chat"),
+		ModelType:       types.StringValue("chat"),
+		Enabled:         types.BoolValue(true),
+		AllowUnpriced:   types.BoolValue(true),
+		ManagedBy:       types.StringValue("companygpt-terraform"),
+		InputMicros:     types.Int64Unknown(),
+		OutputMicros:    types.Int64Unknown(),
+		CachedMicros:    types.Int64Unknown(),
+	}
+	resp := &resource.CreateResponse{State: mustModelState(t, m)}
+	r.Create(context.Background(), resource.CreateRequest{Plan: mustModelPlan(t, m)}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("create/adopt: %v", resp.Diagnostics)
+	}
+	if putPath != "/api/v1/admin/models/model_d0da" {
+		t.Errorf("adopt must PUT the existing doc, got %q", putPath)
+	}
+	assertPriceFieldsAbsent(t, put)
+	if put["allowUnpriced"] != true || put["enabled"] != true || put["managedBy"] != "companygpt-terraform" {
+		t.Errorf("adopt PUT must carry allowUnpriced=true, enabled=true, managedBy; got %v", put)
+	}
+	var st modelResourceModel
+	if d := resp.State.Get(context.Background(), &st); d.HasError() {
+		t.Fatalf("state get: %v", d)
+	}
+	if st.ID.ValueString() != "model_d0da" || st.InputMicros.ValueInt64() != 750000 {
+		t.Errorf("state must reflect the adopted doc (id + server price), got id=%s in=%d", st.ID.ValueString(), st.InputMicros.ValueInt64())
+	}
+}
