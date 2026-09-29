@@ -36,7 +36,7 @@ resource "aigateway_tenant_settings" "this" {
 - `currency` (String) ISO 4217 tenant currency (e.g. EUR, USD). Last-writer-wins: a dashboard edit is not reverted by a no-op apply.
 - `default_access_group_id` (String) Default access group (aigateway_access_group id) applied to callers in no group — e.g. scopes /v1/models for trusted-header (LibreChat) users. Empty = allow-all when unset. Last-writer-wins: leaving it unset does not clear a dashboard-set value.
 - `default_allowed_models` (List of String) Models visible to all users / trusted-header (LibreChat) callers.
-- `default_cost_center_id` (String) Default cost center (budget id) any unscoped key/token attributes to (gate 3 fallback). Empty = unscoped traffic skips gate 3.
+- `default_cost_center_id` (String) Default cost center (budget id) any unscoped key/token attributes to (gate 3 fallback). Removing the attribute after it was set clears the gateway value once (explicit null in the PATCH); while it stays unset it is omitted, so a dashboard-set value survives later applies.
 - `default_user_budget_microdollars` (Number) Per-user global monthly cap in microdollars (gate 2). Ignored when default_user_budget_unlimited = true.
 - `default_user_budget_unlimited` (Boolean) When true, the per-user global max is unlimited (gateway clears the cap).
 - `external_margin_per_1m_tokens_microdollars` (Number) Flat margin per 1M tokens (microdollars) added to non-Azure provider cost when computing customer_cost (customer_cost = provider_cost + tokens × margin). Set 0 so customer_cost == provider_cost (e.g. internal tenants). Omit to leave the gateway default (25000) / a dashboard edit untouched — last-writer-wins.
