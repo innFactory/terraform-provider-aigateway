@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -49,7 +51,7 @@ func TestTenantPatchBodyMarshalsFull(t *testing.T) {
 		OrgBudgetMicros:         ptrInt64(0),
 		Currency:                "EUR",
 		DefaultUserBudgetMicros: json.RawMessage("50000000"),
-		DefaultCostCenterID:     "budget_companygpt",
+		DefaultCostCenterID:     json.RawMessage(`"budget_companygpt"`),
 		DefaultAccessGroupID:    "team_default",
 		ManagedRevision:         "2026-06-21T10:00:00Z",
 	}
@@ -208,6 +210,92 @@ func TestTenantPatchBodyOmitsUnsetMargins(t *testing.T) {
 	got := string(raw)
 	if strings.Contains(got, "azureCommissionPercent") || strings.Contains(got, "externalMarginPer1mTokensMicrodollars") {
 		t.Errorf("unset margins must be omitted, got: %s", got)
+	}
+}
+
+// default_cost_center_id tri-state: set sends the id, removing it after it was
+// set sends an explicit null (the gateway clears on null), and unset before and
+// after omits the key so a dashboard-set value is not reverted.
+func TestDefaultCostCenterPatch(t *testing.T) {
+	set := types.StringValue("budget_companygpt")
+	null := types.StringNull()
+	empty := types.StringValue("")
+	cases := []struct {
+		name  string
+		plan  types.String
+		prior *types.String
+		want  string // "" = omitted (nil)
+	}{
+		{"create with id", set, nil, `"budget_companygpt"`},
+		{"create unset", null, nil, ""},
+		{"update keeps id", set, &set, `"budget_companygpt"`},
+		{"update changes id", types.StringValue("budget_org"), &set, `"budget_org"`},
+		{"update removed after set clears", null, &set, `null`},
+		{"update emptied after set clears", empty, &set, `null`},
+		{"update unset before and after omits", null, &null, ""},
+		{"update set from unset", set, &null, `"budget_companygpt"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := defaultCostCenterPatch(c.plan, c.prior)
+			if c.want == "" {
+				if got != nil {
+					t.Fatalf("want omitted (nil), got %s", got)
+				}
+				return
+			}
+			if string(got) != c.want {
+				t.Fatalf("got %s, want %s", got, c.want)
+			}
+		})
+	}
+}
+
+// End to end over the wire: an Update whose prior state held a default cost
+// center and whose plan no longer does must PATCH "defaultCostCenterId":null.
+// The next Update (unset before and after) must not send the key at all.
+func TestTenantSettingsWriteClearsRemovedDefaultCostCenter(t *testing.T) {
+	var bodies []map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/v1/admin/tenant" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var b map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		bodies = append(bodies, b)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	r := &tenantSettingsResource{client: newClient(srv.URL, "k", "test")}
+	var errs []string
+	sink := &diagSink{add: func(s, d string) { errs = append(errs, s+": "+d) }}
+
+	prior := tenantSettingsResourceModel{
+		DefaultAllowedModels: types.ListNull(types.StringType),
+		DefaultCostCenterID:  types.StringValue("budget_companygpt"),
+	}
+	plan := tenantSettingsResourceModel{
+		DefaultAllowedModels: types.ListNull(types.StringType),
+		DefaultCostCenterID:  types.StringNull(),
+	}
+	r.write(context.Background(), &plan, &prior, sink)
+	// Next apply: the persisted state now holds null, the config is still unset.
+	r.write(context.Background(), &plan, &plan, sink)
+
+	if len(errs) != 0 {
+		t.Fatalf("write errors: %v", errs)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("want 2 PATCH calls, got %d", len(bodies))
+	}
+	if got, ok := bodies[0]["defaultCostCenterId"]; !ok || string(got) != "null" {
+		t.Errorf("first PATCH must clear with null, got %q (present=%v)", got, ok)
+	}
+	if got, ok := bodies[1]["defaultCostCenterId"]; ok {
+		t.Errorf("second PATCH must omit defaultCostCenterId, got %s", got)
 	}
 }
 

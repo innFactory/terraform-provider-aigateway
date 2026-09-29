@@ -84,7 +84,7 @@ func (r *tenantSettingsResource) Schema(_ context.Context, _ resource.SchemaRequ
 			},
 			"default_cost_center_id": schema.StringAttribute{
 				Optional:    true,
-				Description: "Default cost center (budget id) any unscoped key/token attributes to (gate 3 fallback). Empty = unscoped traffic skips gate 3.",
+				Description: "Default cost center (budget id) any unscoped key/token attributes to (gate 3 fallback). Removing the attribute after it was set clears the gateway value once (explicit null in the PATCH); while it stays unset it is omitted, so a dashboard-set value survives later applies.",
 			},
 			"default_access_group_id": schema.StringAttribute{
 				Optional:    true,
@@ -139,8 +139,11 @@ type tenantPatchBody struct {
 	OrgBudgetMicros         *int64          `json:"orgBudgetLimitMicrodollars,omitempty"`
 	Currency                string          `json:"currency,omitempty"`
 	DefaultUserBudgetMicros json.RawMessage `json:"defaultUserBudgetMicrodollars,omitempty"`
-	DefaultCostCenterID     string          `json:"defaultCostCenterId,omitempty"`
-	DefaultAccessGroupID    string          `json:"defaultAccessGroupId,omitempty"`
+	// Tri-state like the user budget: nil omits (gateway keeps its value),
+	// `null` clears (only on the set → removed transition, see
+	// defaultCostCenterPatch), `"id"` sets.
+	DefaultCostCenterID  json.RawMessage `json:"defaultCostCenterId,omitempty"`
+	DefaultAccessGroupID string          `json:"defaultAccessGroupId,omitempty"`
 	// Cost-margin knobs. Pointers with omitempty so an unset attribute is
 	// omitted from the PATCH (gateway keeps its default / last-writer-wins),
 	// while an explicit 0 is a non-nil pointer and IS sent — the intended way
@@ -162,11 +165,36 @@ type tenantAPI struct {
 	ManagedRevision               *string `json:"managedRevision"`
 }
 
-func (r *tenantSettingsResource) write(ctx context.Context, plan *tenantSettingsResourceModel, diags *diagSink) {
+// defaultCostCenterPatch is the defaultCostCenterId value for the PATCH:
+//   - configured → the id (set);
+//   - removed from config while the prior state still held one → JSON null,
+//     which the gateway's double-option field treats as "clear" (it then falls
+//     back to its own default attribution);
+//   - unset before and after → nil (omitted), so a dashboard-set value is not
+//     reverted by an unrelated apply (last-writer-wins).
+//
+// prior is nil on Create. Clearing on the transition only (not on every apply
+// while unset) is what keeps a later dashboard edit from being wiped.
+func defaultCostCenterPatch(plan types.String, prior *types.String) json.RawMessage {
+	if id := optString(plan); id != "" {
+		raw, _ := json.Marshal(id)
+		return raw
+	}
+	if prior != nil && optString(*prior) != "" {
+		return json.RawMessage("null")
+	}
+	return nil
+}
+
+func (r *tenantSettingsResource) write(ctx context.Context, plan, prior *tenantSettingsResourceModel, diags *diagSink) {
+	var priorCostCenter *types.String
+	if prior != nil {
+		priorCostCenter = &prior.DefaultCostCenterID
+	}
 	body := tenantPatchBody{
 		DefaultAllowedModels: listOrNil(ctx, plan.DefaultAllowedModels),
 		Currency:             optString(plan.Currency),
-		DefaultCostCenterID:  optString(plan.DefaultCostCenterID),
+		DefaultCostCenterID:  defaultCostCenterPatch(plan.DefaultCostCenterID, priorCostCenter),
 		DefaultAccessGroupID: optString(plan.DefaultAccessGroupID),
 		ManagedRevision:      time.Now().UTC().Format(time.RFC3339),
 	}
@@ -229,7 +257,7 @@ func (r *tenantSettingsResource) Create(ctx context.Context, req resource.Create
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	r.write(ctx, &plan, &diagSink{add: resp.Diagnostics.AddError})
+	r.write(ctx, &plan, nil, &diagSink{add: resp.Diagnostics.AddError})
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -257,12 +285,13 @@ func (r *tenantSettingsResource) Read(ctx context.Context, req resource.ReadRequ
 }
 
 func (r *tenantSettingsResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan tenantSettingsResourceModel
+	var plan, prior tenantSettingsResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	r.write(ctx, &plan, &diagSink{add: resp.Diagnostics.AddError})
+	r.write(ctx, &plan, &prior, &diagSink{add: resp.Diagnostics.AddError})
 	if resp.Diagnostics.HasError() {
 		return
 	}
