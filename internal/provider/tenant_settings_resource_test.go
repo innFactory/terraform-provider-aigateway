@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -354,7 +355,7 @@ func TestTenantSettingsWriteSendsOidcProxyAuthFromPlan(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		got = append(got, body)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{"oidcProxyAuth":{"directBearer":"deny","requiredGroups":[]}}`))
 	}))
 	defer srv.Close()
 	r := &tenantSettingsResource{client: newClient(srv.URL, "k", "test")}
@@ -453,6 +454,118 @@ func TestTenantSettingsOidcProxyDirectBearerIsOptionalOnlyAndValidated(t *testin
 		}
 		if vresp.Diagnostics.HasError() {
 			t.Errorf("null/unknown must pass: %v", vresp.Diagnostics)
+		}
+	}
+}
+
+// A gateway older than 1.1.4 ignores the unknown oidcProxyAuth object and
+// answers 200 with a tenant document without it. Without a check the state
+// would say "deny" while nothing is enforced, and the no-op Read would never
+// show it. With either attribute configured, a response lacking oidcProxyAuth
+// is an error; without them an old gateway keeps working unchanged.
+func TestTenantSettingsWriteRejectsGatewayWithoutOidcProxyAuth(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response string
+		plan     tenantSettingsResourceModel
+		wantErr  bool
+	}{
+		{
+			name:     "1.1.3 gateway, direct bearer configured",
+			response: `{"defaultAllowedModels":[],"managedRevision":"x"}`,
+			plan: tenantSettingsResourceModel{
+				DefaultAllowedModels:    types.ListNull(types.StringType),
+				OidcProxyDirectBearer:   types.StringValue("deny"),
+				OidcProxyRequiredGroups: types.ListNull(types.StringType),
+			},
+			wantErr: true,
+		},
+		{
+			name:     "1.1.3 gateway, only groups configured",
+			response: `{"defaultAllowedModels":[]}`,
+			plan: tenantSettingsResourceModel{
+				DefaultAllowedModels:    types.ListNull(types.StringType),
+				OidcProxyDirectBearer:   types.StringNull(),
+				OidcProxyRequiredGroups: strListVal([]string{"g1"}),
+			},
+			wantErr: true,
+		},
+		{
+			name:     "1.1.3 gateway, oidc attributes unset",
+			response: `{"defaultAllowedModels":[]}`,
+			plan: tenantSettingsResourceModel{
+				DefaultAllowedModels:    types.ListNull(types.StringType),
+				OidcProxyDirectBearer:   types.StringNull(),
+				OidcProxyRequiredGroups: types.ListNull(types.StringType),
+			},
+			wantErr: false,
+		},
+		{
+			name:     "1.1.4 gateway, direct bearer configured",
+			response: `{"defaultAllowedModels":[],"oidcProxyAuth":{"directBearer":"deny","requiredGroups":[]}}`,
+			plan: tenantSettingsResourceModel{
+				DefaultAllowedModels:    types.ListNull(types.StringType),
+				OidcProxyDirectBearer:   types.StringValue("deny"),
+				OidcProxyRequiredGroups: types.ListNull(types.StringType),
+			},
+			wantErr: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tc.response))
+			}))
+			defer srv.Close()
+			r := &tenantSettingsResource{client: newClient(srv.URL, "k", "test")}
+			var errs []string
+			sink := &diagSink{add: func(s, d string) { errs = append(errs, s+": "+d) }}
+			plan := tc.plan
+			r.write(context.Background(), &plan, nil, sink)
+			if tc.wantErr {
+				if len(errs) != 1 || !strings.Contains(errs[0], "requires gateway 1.1.4 or newer") {
+					t.Errorf("want one 'requires gateway 1.1.4 or newer' error, got %v", errs)
+				}
+			} else if len(errs) != 0 {
+				t.Errorf("want no error, got %v", errs)
+			}
+		})
+	}
+}
+
+// The gateway trims group entries and drops empty ones, so a blank entry
+// would silently clear the requirement. Blank and whitespace-only elements
+// are rejected at plan time; null and unknown lists pass.
+func TestTenantSettingsOidcProxyRequiredGroupsRejectsBlankEntries(t *testing.T) {
+	r := &tenantSettingsResource{}
+	var resp resource.SchemaResponse
+	r.Schema(context.Background(), resource.SchemaRequest{}, &resp)
+	groupsAttr := resp.Schema.Attributes["oidc_proxy_required_groups"].(schema.ListAttribute)
+
+	run := func(v types.List) bool {
+		var vresp validator.ListResponse
+		for _, val := range groupsAttr.Validators {
+			val.ValidateList(context.Background(), validator.ListRequest{Path: path.Root("oidc_proxy_required_groups"), ConfigValue: v}, &vresp)
+		}
+		return vresp.Diagnostics.HasError()
+	}
+	unknownElem, _ := types.ListValue(types.StringType, []attr.Value{types.StringUnknown()})
+	for _, tc := range []struct {
+		name    string
+		value   types.List
+		wantErr bool
+	}{
+		{"empty string", strListVal([]string{""}), true},
+		{"whitespace only", strListVal([]string{" "}), true},
+		{"blank next to a real id", strListVal([]string{"g1", "\t"}), true},
+		{"real ids", strListVal([]string{"g1", "Rathaus-KI"}), false},
+		{"empty list clears", strListVal([]string{}), false},
+		{"null", types.ListNull(types.StringType), false},
+		{"unknown list", types.ListUnknown(types.StringType), false},
+		{"unknown element", unknownElem, false},
+	} {
+		if got := run(tc.value); got != tc.wantErr {
+			t.Errorf("%s: want error=%v, got %v", tc.name, tc.wantErr, got)
 		}
 	}
 }

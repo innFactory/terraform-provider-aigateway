@@ -8,7 +8,9 @@ description: |-
 
 # aigateway_tenant_settings (Resource)
 
-Singleton tenant-wide settings: default allowed models, org budget cap, tenant currency, per-user budget max, default cost center, default access group and the reseller cost-margins. The currency, per-user max, default cost center, default access group and cost-margin fields are **last-writer-wins**: a dashboard edit is not surfaced as drift and will not be reverted by a no-op `terraform apply`.
+Singleton tenant-wide settings: default allowed models, org budget cap, tenant currency, per-user budget max, default cost center, default access group, the reseller cost-margins and the direct-bearer switch. The currency, per-user max, default cost center, default access group, cost-margin and direct-bearer (`oidc_proxy_direct_bearer`, `oidc_proxy_required_groups`) fields are **last-writer-wins**: a dashboard edit is not surfaced as drift and will not be reverted by a no-op `terraform apply`.
+
+The two `oidc_proxy_*` attributes require gateway 1.1.4 or newer; against an older gateway the apply fails instead of recording a switch that is not enforced. They have no dashboard control. Removing either attribute from the configuration, or destroying this resource, leaves the gateway value unchanged: set `oidc_proxy_direct_bearer = "allow"` to reset the switch and `oidc_proxy_required_groups = []` to clear the group requirement.
 
 ## Example Usage
 
@@ -44,8 +46,8 @@ resource "aigateway_tenant_settings" "this" {
 - `default_user_budget_microdollars` (Number) Per-user global monthly cap in microdollars (gate 2). Ignored when default_user_budget_unlimited = true.
 - `default_user_budget_unlimited` (Boolean) When true, the per-user global max is unlimited (gateway clears the cap).
 - `external_margin_per_1m_tokens_microdollars` (Number) Flat margin per 1M tokens (microdollars) added to non-Azure provider cost when computing customer_cost (customer_cost = provider_cost + tokens × margin). Set 0 so customer_cost == provider_cost (e.g. internal tenants). Omit to leave the gateway default (25000) / a dashboard edit untouched — last-writer-wins.
-- `oidc_proxy_direct_bearer` (String) Whether a validated end-user OIDC token may call the proxy (/v1, /mcp) directly as a Bearer. "deny" rejects such tokens with 401 direct_bearer_disabled; API keys and the LibreChat trusted-header path are unaffected. Omit to leave the gateway default (allow) / a dashboard edit untouched — last-writer-wins. Requires gateway >= 1.1.4.
-- `oidc_proxy_required_groups` (List of String) Entra group ids a direct OIDC bearer must carry at least one of; a token without an authoritative group list is rejected (403 group_required). Set [] to clear. Omit to leave untouched — last-writer-wins. Requires gateway >= 1.1.4.
+- `oidc_proxy_direct_bearer` (String) Whether a validated end-user OIDC token may call the proxy (/v1, /mcp) directly as a Bearer: "allow" (gateway default) or "deny" (401 direct_bearer_disabled; API keys and the LibreChat trusted-header path are unaffected). Requires gateway 1.1.4 or newer; against an older gateway the apply fails. Last-writer-wins: removing the attribute from the configuration, or destroying the resource, leaves the gateway value unchanged — set "allow" to reset.
+- `oidc_proxy_required_groups` (List of String) Groups a direct OIDC bearer must carry at least one of (Entra group object ids, or the names a Keycloak groups claim carries); a token without an authoritative group list is rejected (403 group_required). Entries must not be blank. Set [] to clear the requirement. Requires gateway 1.1.4 or newer; against an older gateway the apply fails. Last-writer-wins: removing the attribute from the configuration, or destroying the resource, leaves the gateway value unchanged.
 - `org_budget_limit_microdollars` (Number) Org monthly budget cap in microdollars. Ignored when org_budget_unlimited = true.
 - `org_budget_unlimited` (Boolean) When true, the org budget is set to unlimited (no cap).
 

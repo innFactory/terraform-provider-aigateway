@@ -112,12 +112,13 @@ func (r *tenantSettingsResource) Schema(_ context.Context, _ resource.SchemaRequ
 			"oidc_proxy_direct_bearer": schema.StringAttribute{
 				Optional:    true,
 				Validators:  []validator.String{oneOfString{"allow", "deny"}},
-				Description: "Whether a validated end-user OIDC token may call the proxy (/v1, /mcp) directly as a Bearer. \"deny\" rejects such tokens with 401 direct_bearer_disabled; API keys and the LibreChat trusted-header path are unaffected. Omit to leave the gateway default (allow) / a dashboard edit untouched — last-writer-wins. Requires gateway >= 1.1.4.",
+				Description: "Whether a validated end-user OIDC token may call the proxy (/v1, /mcp) directly as a Bearer: \"allow\" (gateway default) or \"deny\" (401 direct_bearer_disabled; API keys and the LibreChat trusted-header path are unaffected). Requires gateway 1.1.4 or newer; against an older gateway the apply fails. Last-writer-wins: removing the attribute from the configuration, or destroying the resource, leaves the gateway value unchanged — set \"allow\" to reset.",
 			},
 			"oidc_proxy_required_groups": schema.ListAttribute{
 				Optional:    true,
 				ElementType: types.StringType,
-				Description: "Entra group ids a direct OIDC bearer must carry at least one of; a token without an authoritative group list is rejected (403 group_required). Set [] to clear. Omit to leave untouched — last-writer-wins. Requires gateway >= 1.1.4.",
+				Validators:  []validator.List{nonBlankStringElements{}},
+				Description: "Groups a direct OIDC bearer must carry at least one of (Entra group object ids, or the names a Keycloak groups claim carries); a token without an authoritative group list is rejected (403 group_required). Entries must not be blank. Set [] to clear the requirement. Requires gateway 1.1.4 or newer; against an older gateway the apply fails. Last-writer-wins: removing the attribute from the configuration, or destroying the resource, leaves the gateway value unchanged.",
 			},
 			"managed_revision": schema.StringAttribute{
 				// Computed-only (provider-managed), NOT Optional, and deliberately
@@ -288,8 +289,22 @@ func (r *tenantSettingsResource) write(ctx context.Context, plan, prior *tenantS
 	body.OidcProxyAuth = oidc
 	// Persist the revision we stamped so it round-trips into state.
 	plan.ManagedRevision = types.StringValue(body.ManagedRevision)
-	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/tenant", nil, body, nil); err != nil {
+	// The PATCH answers with the tenant document (TenantSettingsResponse on
+	// every gateway version). It is decoded only to check that a configured
+	// direct-bearer switch was understood: a gateway older than 1.1.4 has no
+	// deny_unknown_fields, so it ignores oidcProxyAuth and answers 200. The
+	// state would then claim "deny" while nothing is enforced, and the no-op
+	// Read would never surface it.
+	var out tenantAPI
+	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/tenant", nil, body, &out); err != nil {
 		diags.err("Update tenant settings failed", err.Error())
+		return
+	}
+	if body.OidcProxyAuth != nil && out.OidcProxyAuth == nil {
+		diags.err("oidc_proxy_direct_bearer / oidc_proxy_required_groups not supported",
+			"The gateway does not support oidcProxyAuth; it requires gateway 1.1.4 or newer. "+
+				"The other tenant settings of this apply were written; the direct-bearer switch was not. "+
+				"Upgrade the gateway or remove both oidc_proxy_* attributes.")
 	}
 }
 
@@ -313,6 +328,36 @@ func applyTenantRead(_ *tenantSettingsResourceModel, _ *tenantAPI) {
 	// org/user budgets, currency, default_cost_center_id, default_access_group_id,
 	// oidc_proxy_direct_bearer, oidc_proxy_required_groups:
 	// intentionally untouched (last-writer-wins / config-driven).
+}
+
+// nonBlankStringElements rejects empty or whitespace-only elements of a string
+// list at plan time. The gateway trims group entries and drops empty ones, so
+// [""] would silently clear oidc_proxy_required_groups instead of requiring a
+// group. A null or unknown list, and unknown elements, pass (resolved at apply).
+type nonBlankStringElements struct{}
+
+func (nonBlankStringElements) Description(_ context.Context) string {
+	return "elements must not be empty or whitespace only"
+}
+
+func (v nonBlankStringElements) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (v nonBlankStringElements) ValidateList(ctx context.Context, req validator.ListRequest, resp *validator.ListResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	for i, el := range req.ConfigValue.Elements() {
+		sv, ok := el.(types.String)
+		if !ok || sv.IsUnknown() {
+			continue
+		}
+		if sv.IsNull() || strings.TrimSpace(sv.ValueString()) == "" {
+			resp.Diagnostics.AddAttributeError(req.Path.AtListIndex(i), "Invalid attribute value",
+				fmt.Sprintf("%s: element %d is blank", v.Description(ctx), i))
+		}
+	}
 }
 
 // oneOfString is a plan-time validator for a fixed set of string values. Kept
