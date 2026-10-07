@@ -10,4 +10,8 @@ resource "aigateway_tenant_settings" "this" {
   # (e.g. internal tenants). Omit both to keep the gateway defaults (20% / 25000).
   azure_commission_percent                   = 0
   external_margin_per_1m_tokens_microdollars = 0
+
+  # Optional, gateway >= 1.1.4: end-user OIDC tokens may not call /v1 and /mcp
+  # directly (LibreChat trusted-header traffic and API keys are unaffected).
+  oidc_proxy_direct_bearer = "deny"
 }

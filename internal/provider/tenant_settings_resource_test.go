@@ -8,8 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -300,3 +302,157 @@ func TestTenantSettingsWriteClearsRemovedDefaultCostCenter(t *testing.T) {
 }
 
 func ptrInt64(v int64) *int64 { return &v }
+
+// --- oidc_proxy_direct_bearer / oidc_proxy_required_groups (gateway >= 1.1.4) ---
+
+// Both attributes unset → no oidcProxyAuth object at all, so a dashboard-set
+// switch survives an unrelated apply (last-writer-wins, like default_access_group_id).
+func TestTenantPatchBodyOmitsUnsetOidcProxyAuth(t *testing.T) {
+	body := tenantPatchBody{
+		DefaultAllowedModels: []string{"gpt-4o"},
+		OrgBudgetMicros:      ptrInt64(0),
+		ManagedRevision:      "2026-06-21T10:00:00Z",
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "oidcProxyAuth") {
+		t.Errorf("unset oidc proxy auth must be omitted, got: %s", raw)
+	}
+}
+
+// Only the configured field travels; an explicit empty group list is sent as
+// [] (clear), which a plain []string with omitempty would silently drop.
+func TestTenantPatchBodyOidcProxyAuthSendsOnlySetFields(t *testing.T) {
+	deny := "deny"
+	body := tenantPatchBody{
+		DefaultAllowedModels: []string{"gpt-4o"},
+		OrgBudgetMicros:      ptrInt64(0),
+		OidcProxyAuth:        &oidcProxyAuthPatch{DirectBearer: &deny},
+		ManagedRevision:      "2026-06-21T10:00:00Z",
+	}
+	raw, _ := json.Marshal(body)
+	if got := string(raw); !strings.Contains(got, `"oidcProxyAuth":{"directBearer":"deny"}`) {
+		t.Errorf("directBearer alone must be sent without requiredGroups, got: %s", got)
+	}
+
+	empty := []string{}
+	body.OidcProxyAuth = &oidcProxyAuthPatch{RequiredGroups: &empty}
+	raw, _ = json.Marshal(body)
+	if !strings.Contains(string(raw), `"oidcProxyAuth":{"requiredGroups":[]}`) {
+		t.Errorf("an explicit empty list clears the requirement and must be sent as [], got: %s", raw)
+	}
+}
+
+// write() builds the object from the plan: deny + two groups → both fields;
+// an explicitly empty list → []; nothing configured → no object.
+func TestTenantSettingsWriteSendsOidcProxyAuthFromPlan(t *testing.T) {
+	var got []map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got = append(got, body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	r := &tenantSettingsResource{client: newClient(srv.URL, "k", "test")}
+	ctx := context.Background()
+	sink := &diagSink{add: func(s, d string) { t.Fatalf("unexpected diag: %s: %s", s, d) }}
+
+	plan := tenantSettingsResourceModel{
+		DefaultAllowedModels:    types.ListNull(types.StringType),
+		OidcProxyDirectBearer:   types.StringValue("deny"),
+		OidcProxyRequiredGroups: strListVal([]string{"g1", "g2"}),
+	}
+	r.write(ctx, &plan, nil, sink)
+	if string(got[0]["oidcProxyAuth"]) != `{"directBearer":"deny","requiredGroups":["g1","g2"]}` {
+		t.Errorf("deny + groups: got %s", got[0]["oidcProxyAuth"])
+	}
+
+	plan = tenantSettingsResourceModel{
+		DefaultAllowedModels:    types.ListNull(types.StringType),
+		OidcProxyDirectBearer:   types.StringNull(),
+		OidcProxyRequiredGroups: strListVal([]string{}),
+	}
+	r.write(ctx, &plan, nil, sink)
+	if string(got[1]["oidcProxyAuth"]) != `{"requiredGroups":[]}` {
+		t.Errorf("explicit empty list must clear with []: got %s", got[1]["oidcProxyAuth"])
+	}
+
+	plan = tenantSettingsResourceModel{
+		DefaultAllowedModels:    types.ListNull(types.StringType),
+		OidcProxyDirectBearer:   types.StringNull(),
+		OidcProxyRequiredGroups: types.ListNull(types.StringType),
+	}
+	r.write(ctx, &plan, nil, sink)
+	if _, present := got[2]["oidcProxyAuth"]; present {
+		t.Errorf("nothing configured must omit the object: got %s", got[2]["oidcProxyAuth"])
+	}
+}
+
+// Same last-writer-wins contract as default_access_group_id: a dashboard edit
+// of the switch must not surface as drift while the attribute is unset.
+func TestTenantSettingsReadDoesNotRevertOidcProxyAuth(t *testing.T) {
+	state := tenantSettingsResourceModel{
+		OidcProxyDirectBearer:   types.StringNull(),
+		OidcProxyRequiredGroups: types.ListNull(types.StringType),
+	}
+	applyTenantRead(&state, &tenantAPI{OidcProxyAuth: &oidcProxyAuthAPI{DirectBearer: "deny", RequiredGroups: []string{"g1"}}})
+	if !state.OidcProxyDirectBearer.IsNull() || !state.OidcProxyRequiredGroups.IsNull() {
+		t.Errorf("read must not fill unset oidc proxy attributes: %+v", state)
+	}
+}
+
+// The switch is Optional only — no Computed, no default, no plan modifier
+// (Optional+Computed without UseStateForUnknown turned "unknown" into a
+// reset before) — and accepts exactly allow|deny at plan time.
+func TestTenantSettingsOidcProxyDirectBearerIsOptionalOnlyAndValidated(t *testing.T) {
+	r := &tenantSettingsResource{}
+	var resp resource.SchemaResponse
+	r.Schema(context.Background(), resource.SchemaRequest{}, &resp)
+
+	raw, ok := resp.Schema.Attributes["oidc_proxy_direct_bearer"]
+	if !ok {
+		t.Fatal("oidc_proxy_direct_bearer attribute missing from schema")
+	}
+	attr, ok := raw.(schema.StringAttribute)
+	if !ok {
+		t.Fatalf("oidc_proxy_direct_bearer is %T, want schema.StringAttribute", raw)
+	}
+	if !attr.Optional || attr.Computed || attr.Required || attr.Default != nil || len(attr.PlanModifiers) != 0 {
+		t.Errorf("oidc_proxy_direct_bearer must be Optional only (no Computed/Default/PlanModifiers): %+v", attr)
+	}
+	groupsRaw, ok := resp.Schema.Attributes["oidc_proxy_required_groups"].(schema.ListAttribute)
+	if !ok {
+		t.Fatalf("oidc_proxy_required_groups is %T, want schema.ListAttribute", resp.Schema.Attributes["oidc_proxy_required_groups"])
+	}
+	if !groupsRaw.Optional || groupsRaw.Computed || groupsRaw.Default != nil || len(groupsRaw.PlanModifiers) != 0 {
+		t.Errorf("oidc_proxy_required_groups must be Optional only: %+v", groupsRaw)
+	}
+
+	for _, tc := range []struct {
+		value string
+		ok    bool
+	}{{"allow", true}, {"deny", true}, {"maybe", false}, {"", false}, {"Deny", false}} {
+		req := validator.StringRequest{Path: path.Root("oidc_proxy_direct_bearer"), ConfigValue: types.StringValue(tc.value)}
+		var vresp validator.StringResponse
+		for _, v := range attr.Validators {
+			v.ValidateString(context.Background(), req, &vresp)
+		}
+		if vresp.Diagnostics.HasError() == tc.ok {
+			t.Errorf("value %q: want ok=%v, diagnostics: %v", tc.value, tc.ok, vresp.Diagnostics)
+		}
+	}
+	// Null and unknown are not validated (the attribute is optional).
+	for _, cv := range []types.String{types.StringNull(), types.StringUnknown()} {
+		var vresp validator.StringResponse
+		for _, v := range attr.Validators {
+			v.ValidateString(context.Background(), validator.StringRequest{Path: path.Root("oidc_proxy_direct_bearer"), ConfigValue: cv}, &vresp)
+		}
+		if vresp.Diagnostics.HasError() {
+			t.Errorf("null/unknown must pass: %v", vresp.Diagnostics)
+		}
+	}
+}

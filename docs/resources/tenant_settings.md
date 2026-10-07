@@ -24,6 +24,10 @@ resource "aigateway_tenant_settings" "this" {
   # Access group applied to callers in no other group — scopes /v1/models for
   # trusted-header (LibreChat) users.
   default_access_group_id = aigateway_access_group.librechat_default.id
+
+  # Gateway >= 1.1.4: end-user OIDC tokens may not call /v1 and /mcp directly
+  # (LibreChat trusted-header traffic and API keys are unaffected).
+  oidc_proxy_direct_bearer = "deny"
 }
 ```
 
@@ -40,6 +44,8 @@ resource "aigateway_tenant_settings" "this" {
 - `default_user_budget_microdollars` (Number) Per-user global monthly cap in microdollars (gate 2). Ignored when default_user_budget_unlimited = true.
 - `default_user_budget_unlimited` (Boolean) When true, the per-user global max is unlimited (gateway clears the cap).
 - `external_margin_per_1m_tokens_microdollars` (Number) Flat margin per 1M tokens (microdollars) added to non-Azure provider cost when computing customer_cost (customer_cost = provider_cost + tokens × margin). Set 0 so customer_cost == provider_cost (e.g. internal tenants). Omit to leave the gateway default (25000) / a dashboard edit untouched — last-writer-wins.
+- `oidc_proxy_direct_bearer` (String) Whether a validated end-user OIDC token may call the proxy (/v1, /mcp) directly as a Bearer. "deny" rejects such tokens with 401 direct_bearer_disabled; API keys and the LibreChat trusted-header path are unaffected. Omit to leave the gateway default (allow) / a dashboard edit untouched — last-writer-wins. Requires gateway >= 1.1.4.
+- `oidc_proxy_required_groups` (List of String) Entra group ids a direct OIDC bearer must carry at least one of; a token without an authoritative group list is rejected (403 group_required). Set [] to clear. Omit to leave untouched — last-writer-wins. Requires gateway >= 1.1.4.
 - `org_budget_limit_microdollars` (Number) Org monthly budget cap in microdollars. Ignored when org_budget_unlimited = true.
 - `org_budget_unlimited` (Boolean) When true, the org budget is set to unlimited (no cap).
 

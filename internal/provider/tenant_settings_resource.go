@@ -3,12 +3,15 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -42,6 +45,8 @@ type tenantSettingsResourceModel struct {
 	DefaultAccessGroupID       types.String  `tfsdk:"default_access_group_id"`
 	AzureCommissionPercent     types.Float64 `tfsdk:"azure_commission_percent"`
 	ExternalMarginMicros       types.Int64   `tfsdk:"external_margin_per_1m_tokens_microdollars"`
+	OidcProxyDirectBearer      types.String  `tfsdk:"oidc_proxy_direct_bearer"`
+	OidcProxyRequiredGroups    types.List    `tfsdk:"oidc_proxy_required_groups"`
 	ManagedRevision            types.String  `tfsdk:"managed_revision"`
 }
 
@@ -98,6 +103,22 @@ func (r *tenantSettingsResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Optional:    true,
 				Description: "Flat margin per 1M tokens (microdollars) added to non-Azure provider cost when computing customer_cost (customer_cost = provider_cost + tokens × margin). Set 0 so customer_cost == provider_cost (e.g. internal tenants). Omit to leave the gateway default (25000) / a dashboard edit untouched — last-writer-wins.",
 			},
+			// Both oidc_proxy_* attributes are Optional ONLY: no Computed, no
+			// Default, no plan modifier. Optional+Computed without
+			// UseStateForUnknown planned "unknown" on every update and the
+			// provider's Update then sent the zero value, silently resetting
+			// the setting (the aigateway_provider `enabled` incident). Unset
+			// here means "not sent" (last-writer-wins), never "reset".
+			"oidc_proxy_direct_bearer": schema.StringAttribute{
+				Optional:    true,
+				Validators:  []validator.String{oneOfString{"allow", "deny"}},
+				Description: "Whether a validated end-user OIDC token may call the proxy (/v1, /mcp) directly as a Bearer. \"deny\" rejects such tokens with 401 direct_bearer_disabled; API keys and the LibreChat trusted-header path are unaffected. Omit to leave the gateway default (allow) / a dashboard edit untouched — last-writer-wins. Requires gateway >= 1.1.4.",
+			},
+			"oidc_proxy_required_groups": schema.ListAttribute{
+				Optional:    true,
+				ElementType: types.StringType,
+				Description: "Entra group ids a direct OIDC bearer must carry at least one of; a token without an authoritative group list is rejected (403 group_required). Set [] to clear. Omit to leave untouched — last-writer-wins. Requires gateway >= 1.1.4.",
+			},
 			"managed_revision": schema.StringAttribute{
 				// Computed-only (provider-managed), NOT Optional, and deliberately
 				// WITHOUT UseStateForUnknown: write() stamps a fresh time.Now() on
@@ -150,7 +171,26 @@ type tenantPatchBody struct {
 	// to make customer_cost == provider_cost for internal tenants.
 	AzureCommissionPercent *float64 `json:"azureCommissionPercent,omitempty"`
 	ExternalMarginMicros   *int64   `json:"externalMarginPer1mTokensMicrodollars,omitempty"`
-	ManagedRevision        string   `json:"managedRevision,omitempty"`
+	// Direct-bearer switch (gateway >= 1.1.4). nil omits the whole object so
+	// a dashboard edit survives; inside it only the configured fields travel.
+	OidcProxyAuth   *oidcProxyAuthPatch `json:"oidcProxyAuth,omitempty"`
+	ManagedRevision string              `json:"managedRevision,omitempty"`
+}
+
+// oidcProxyAuthPatch is the PATCH shape of the tenant's oidcProxyAuth object.
+// RequiredGroups is a *[]string, not a []string with omitempty: omitempty
+// drops an empty slice, but an explicit [] is exactly how the requirement is
+// cleared, so it must be sent.
+type oidcProxyAuthPatch struct {
+	DirectBearer   *string   `json:"directBearer,omitempty"`
+	RequiredGroups *[]string `json:"requiredGroups,omitempty"`
+}
+
+// oidcProxyAuthAPI is the GET shape; read for completeness, never copied into
+// state (last-writer-wins, see applyTenantRead).
+type oidcProxyAuthAPI struct {
+	DirectBearer   string   `json:"directBearer"`
+	RequiredGroups []string `json:"requiredGroups"`
 }
 
 type tenantAPI struct {
@@ -158,11 +198,12 @@ type tenantAPI struct {
 	OrgBudget            *struct {
 		MonthlyLimitMicrodollars *int64 `json:"monthlyLimitMicrodollars"`
 	} `json:"orgBudget"`
-	Currency                      string  `json:"currency"`
-	DefaultUserBudgetMicrodollars *int64  `json:"defaultUserBudgetMicrodollars"`
-	DefaultCostCenterID           string  `json:"defaultCostCenterId"`
-	DefaultAccessGroupID          string  `json:"defaultAccessGroupId"`
-	ManagedRevision               *string `json:"managedRevision"`
+	Currency                      string            `json:"currency"`
+	DefaultUserBudgetMicrodollars *int64            `json:"defaultUserBudgetMicrodollars"`
+	DefaultCostCenterID           string            `json:"defaultCostCenterId"`
+	DefaultAccessGroupID          string            `json:"defaultAccessGroupId"`
+	ManagedRevision               *string           `json:"managedRevision"`
+	OidcProxyAuth                 *oidcProxyAuthAPI `json:"oidcProxyAuth"`
 }
 
 // defaultCostCenterPatch is the defaultCostCenterId value for the PATCH:
@@ -223,6 +264,28 @@ func (r *tenantSettingsResource) write(ctx context.Context, plan, prior *tenantS
 		v := plan.ExternalMarginMicros.ValueInt64()
 		body.ExternalMarginMicros = &v
 	}
+	// Direct-bearer switch: the object is sent only when at least one of the
+	// two attributes is configured; each field only when set. An explicitly
+	// empty group list is sent as [] (clear), never dropped.
+	var oidc *oidcProxyAuthPatch
+	if !plan.OidcProxyDirectBearer.IsNull() && !plan.OidcProxyDirectBearer.IsUnknown() {
+		v := plan.OidcProxyDirectBearer.ValueString()
+		oidc = &oidcProxyAuthPatch{DirectBearer: &v}
+	}
+	if !plan.OidcProxyRequiredGroups.IsNull() && !plan.OidcProxyRequiredGroups.IsUnknown() {
+		var groups []string
+		for _, d := range plan.OidcProxyRequiredGroups.ElementsAs(ctx, &groups, false) {
+			diags.err(d.Summary(), d.Detail())
+		}
+		if groups == nil {
+			groups = []string{}
+		}
+		if oidc == nil {
+			oidc = &oidcProxyAuthPatch{}
+		}
+		oidc.RequiredGroups = &groups
+	}
+	body.OidcProxyAuth = oidc
 	// Persist the revision we stamped so it round-trips into state.
 	plan.ManagedRevision = types.StringValue(body.ManagedRevision)
 	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/tenant", nil, body, nil); err != nil {
@@ -247,8 +310,35 @@ func (d *diagSink) err(summary, detail string) { d.add(summary, detail) }
 // default_allowed_models is reflected in Read itself, where ctx/diags are
 // available for the types.List conversion.
 func applyTenantRead(_ *tenantSettingsResourceModel, _ *tenantAPI) {
-	// org/user budgets, currency, default_cost_center_id, default_access_group_id:
+	// org/user budgets, currency, default_cost_center_id, default_access_group_id,
+	// oidc_proxy_direct_bearer, oidc_proxy_required_groups:
 	// intentionally untouched (last-writer-wins / config-driven).
+}
+
+// oneOfString is a plan-time validator for a fixed set of string values. Kept
+// in-package so the provider does not pull in terraform-plugin-framework-
+// validators for one attribute. Null and unknown values pass (the attribute
+// is optional; unknown is resolved at apply).
+type oneOfString []string
+
+func (o oneOfString) Description(_ context.Context) string {
+	return "value must be one of: " + strings.Join(o, ", ")
+}
+
+func (o oneOfString) MarkdownDescription(ctx context.Context) string { return o.Description(ctx) }
+
+func (o oneOfString) ValidateString(ctx context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	got := req.ConfigValue.ValueString()
+	for _, v := range o {
+		if got == v {
+			return
+		}
+	}
+	resp.Diagnostics.AddAttributeError(req.Path, "Invalid attribute value",
+		fmt.Sprintf("%s: got %q", o.Description(ctx), got))
 }
 
 func (r *tenantSettingsResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
