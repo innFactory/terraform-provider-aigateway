@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -45,6 +46,8 @@ type modelResourceModel struct {
 	PriceRegion     types.String `tfsdk:"price_region"`
 	ManagedBy       types.String `tfsdk:"managed_by"`
 	AllowUnpriced   types.Bool   `tfsdk:"allow_unpriced"`
+	ContextWindow   types.Int64  `tfsdk:"context_window"`
+	MaxOutputTokens types.Int64  `tfsdk:"max_output_tokens"`
 	ID              types.String `tfsdk:"id"`
 }
 
@@ -145,6 +148,20 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"the same check whenever enabled is true. It is not stored or returned, so it is never " +
 					"reflected back into state and changing it alone produces no diff.",
 			},
+			"context_window": schema.Int64Attribute{
+				Optional:      true,
+				Computed:      true,
+				Description:   "Context window of the model in tokens (gateway >= 1.1.0). Omitted = the gateway keeps whatever is stored (e.g. set in the dashboard): an attribute unset in the configuration is not sent, and never sent as null. Removing it from the configuration keeps the current value; Terraform cannot clear it, clear it in the dashboard. Must be at least 1.",
+				Validators:    []validator.Int64{atLeastInt64(1)},
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
+			},
+			"max_output_tokens": schema.Int64Attribute{
+				Optional:      true,
+				Computed:      true,
+				Description:   "Maximum output tokens of the model (gateway >= 1.1.0). Omitted = the gateway keeps whatever is stored (e.g. set in the dashboard): an attribute unset in the configuration is not sent, and never sent as null. Removing it from the configuration keeps the current value; Terraform cannot clear it, clear it in the dashboard. Must be at least 1.",
+				Validators:    []validator.Int64{atLeastInt64(1)},
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
+			},
 			"managed_by": schema.StringAttribute{
 				Optional:    true,
 				Description: "Free-form marker stored on the gateway object (e.g. companygpt-terraform) so the UI can flag IaC-managed providers/models.",
@@ -181,6 +198,9 @@ type modelCreateBody struct {
 	PriceRegion     *string `json:"priceRegion,omitempty"`
 	ManagedBy       *string `json:"managedBy,omitempty"`
 	AllowUnpriced   bool    `json:"allowUnpriced,omitempty"`
+	// Optional positive integers on the gateway; omitted = unknown.
+	ContextWindow   *int64 `json:"contextWindow,omitempty"`
+	MaxOutputTokens *int64 `json:"maxOutputTokens,omitempty"`
 }
 
 type modelUpdateBody struct {
@@ -199,6 +219,10 @@ type modelUpdateBody struct {
 	// on a model whose EFFECTIVE price is zero unless this flag is set — and it
 	// evaluates that on PUT as well as on POST (`UpdateModelRequest.allow_unpriced`).
 	AllowUnpriced *bool `json:"allowUnpriced,omitempty"`
+	// Three-state on the gateway: absent = keep, null = clear, number = set.
+	// omitempty on a nil pointer means ABSENT; this body can never send null.
+	ContextWindow   *int64 `json:"contextWindow,omitempty"`
+	MaxOutputTokens *int64 `json:"maxOutputTokens,omitempty"`
 }
 
 type modelAPI struct {
@@ -217,6 +241,9 @@ type modelAPI struct {
 	IsDefault       bool    `json:"isDefault"`
 	PriceRegion     *string `json:"priceRegion"`
 	ManagedBy       string  `json:"managedBy"`
+	// The gateway omits both when unknown.
+	ContextWindow   *int64 `json:"contextWindow"`
+	MaxOutputTokens *int64 `json:"maxOutputTokens"`
 }
 
 func defStr(v types.String, def string) string {
@@ -285,6 +312,8 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		PriceRegion:     ptrIf(plan.PriceRegion),
 		ManagedBy:       ptrIf(plan.ManagedBy),
 		AllowUnpriced:   defBool(plan.AllowUnpriced, false),
+		ContextWindow:   int64PtrIf(plan.ContextWindow),
+		MaxOutputTokens: int64PtrIf(plan.MaxOutputTokens),
 	}
 	var out modelAPI
 	err := r.client.do(ctx, "POST", "/api/v1/admin/models", nil, body, &out)
@@ -304,6 +333,10 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		}
 		out = *adopted
 	} else if err != nil {
+		resp.Diagnostics.AddError("Create model failed", err.Error())
+		return
+	}
+	if err := checkWindowsEchoed(body.ContextWindow, body.MaxOutputTokens, &out); err != nil {
 		resp.Diagnostics.AddError("Create model failed", err.Error())
 		return
 	}
@@ -348,6 +381,8 @@ func (r *modelResource) adoptExistingModel(ctx context.Context, plan *modelResou
 		PriceRegion:     body.PriceRegion,
 		ManagedBy:       body.ManagedBy,
 		AllowUnpriced:   boolPtrIfTrue(plan.AllowUnpriced),
+		ContextWindow:   int64PtrIf(plan.ContextWindow),
+		MaxOutputTokens: int64PtrIf(plan.MaxOutputTokens),
 	}
 	var out modelAPI
 	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+match.ID, nil, upd, &out); err != nil {
@@ -413,9 +448,10 @@ func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp
 }
 
 func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan, state modelResourceModel
+	var plan, state, cfg modelResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -441,6 +477,12 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		PriceRegion:     ptrIf(plan.PriceRegion),
 		ManagedBy:       ptrIf(plan.ManagedBy),
 		AllowUnpriced:   boolPtrIfTrue(plan.AllowUnpriced),
+		// The windows come from the CONFIG, not the plan: UseStateForUnknown plans
+		// an unset attribute as its (possibly stale) state value, and re-sending
+		// that would revert a dashboard edit. Unset in config => omitted, so the
+		// gateway keeps whatever it holds.
+		ContextWindow:   int64PtrIf(cfg.ContextWindow),
+		MaxOutputTokens: int64PtrIf(cfg.MaxOutputTokens),
 	}
 	// Address by the doc id from state (plan.ID may be unknown mid-plan);
 	// model_id is immutable (RequiresReplace), so the state's name is the
@@ -449,6 +491,10 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	var out modelAPI
 	if err := r.client.do(ctx, "PUT", p, nil, body, &out); err != nil {
 		resp.Diagnostics.AddError("Update model failed", modelErrDetail(err, byName))
+		return
+	}
+	if err := checkWindowsEchoed(body.ContextWindow, body.MaxOutputTokens, &out); err != nil {
+		resp.Diagnostics.AddError("Update model failed", err.Error())
 		return
 	}
 	r.apply(&plan, &out)
@@ -533,6 +579,8 @@ func (r *modelResource) apply(m *modelResourceModel, a *modelAPI) {
 	m.CachedMicros = types.Int64Value(a.CachedMicros)
 	m.Enabled = types.BoolValue(a.Enabled)
 	m.IsDefault = types.BoolValue(a.IsDefault)
+	m.ContextWindow = int64FromPtr(a.ContextWindow)
+	m.MaxOutputTokens = int64FromPtr(a.MaxOutputTokens)
 	// price_region is Optional (not Computed): only reflect a server value when
 	// the response carries one, otherwise keep the planned/null value to avoid
 	// "inconsistent result" errors when unset.
@@ -549,4 +597,53 @@ func (r *modelResource) apply(m *modelResourceModel, a *modelAPI) {
 	if a.ManagedBy != "" {
 		m.ManagedBy = types.StringValue(a.ManagedBy)
 	}
+}
+
+// int64FromPtr maps an optional API integer to state: null when the gateway
+// does not know the value (the attribute is Computed, so null is a valid result).
+func int64FromPtr(p *int64) types.Int64 {
+	if p == nil {
+		return types.Int64Null()
+	}
+	return types.Int64Value(*p)
+}
+
+// atLeastInt64 is a plan-time lower-bound validator, kept in-package like
+// oneOfString so the provider does not pull in terraform-plugin-framework-
+// validators for one check. Null and unknown values pass.
+type atLeastInt64 int64
+
+func (a atLeastInt64) Description(_ context.Context) string {
+	return fmt.Sprintf("value must be at least %d", int64(a))
+}
+
+func (a atLeastInt64) MarkdownDescription(ctx context.Context) string { return a.Description(ctx) }
+
+func (a atLeastInt64) ValidateInt64(ctx context.Context, req validator.Int64Request, resp *validator.Int64Response) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	if got := req.ConfigValue.ValueInt64(); got < int64(a) {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid attribute value",
+			fmt.Sprintf("%s: got %d", a.Description(ctx), got))
+	}
+}
+
+// checkWindowsEchoed fails when a window that was sent comes back absent: a
+// gateway older than 1.1.0 ignores the fields and answers 200, and Terraform
+// would otherwise report an "inconsistent result" bug in the provider.
+func checkWindowsEchoed(sentCtx, sentMax *int64, out *modelAPI) error {
+	for _, w := range []struct {
+		name string
+		sent *int64
+		got  *int64
+	}{
+		{"context_window", sentCtx, out.ContextWindow},
+		{"max_output_tokens", sentMax, out.MaxOutputTokens},
+	} {
+		if w.sent != nil && w.got == nil {
+			return fmt.Errorf("the gateway ignored %s: it needs gateway >= 1.1.0; upgrade the gateway or remove the attribute", w.name)
+		}
+	}
+	return nil
 }
