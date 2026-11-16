@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
@@ -670,3 +672,143 @@ func TestModelCreateAdoptsOnConflictWithoutWipingPrice(t *testing.T) {
 		t.Errorf("state must reflect the adopted doc (id + server price), got id=%s in=%d", st.ID.ValueString(), st.InputMicros.ValueInt64())
 	}
 }
+
+// ── context_window / max_output_tokens (gateway >= 1.1.0) ──
+//
+// PUT is three-state on the gateway: absent = keep, null = clear, number = set.
+// An attribute that is unset in config (Optional+Computed, so unknown in the
+// plan) must therefore be OMITTED, never sent as null or 0, or Terraform would
+// wipe a window an admin set in the dashboard.
+
+func testWindowModel(ctxWin, maxOut types.Int64) modelResourceModel {
+	return modelResourceModel{
+		ID: types.StringValue("model_abc"), ModelID: types.StringValue("m"), DisplayName: types.StringValue("m"),
+		ProviderID: types.StringValue("p"), ProviderModelID: types.StringValue("m"),
+		ContextWindow: ctxWin, MaxOutputTokens: maxOut,
+	}
+}
+
+func TestModelWindowsOnTheWire(t *testing.T) {
+	const ctxKey, maxKey = "contextWindow", "maxOutputTokens"
+	tests := []struct {
+		name         string
+		method       string // POST (create) or PUT (update)
+		ctxWin       types.Int64
+		maxOut       types.Int64
+		wantCtx      any // nil = key must be absent
+		wantMax      any
+		serverAnswer modelAPI
+	}{
+		{"create sends both when set", "POST", types.Int64Value(128000), types.Int64Value(16000), float64(128000), float64(16000), modelAPI{ContextWindow: i64p(128000), MaxOutputTokens: i64p(16000)}},
+		{"create omits both when unset", "POST", types.Int64Unknown(), types.Int64Null(), nil, nil, modelAPI{}},
+		{"update sends both when set", "PUT", types.Int64Value(128000), types.Int64Value(16000), float64(128000), float64(16000), modelAPI{ContextWindow: i64p(128000), MaxOutputTokens: i64p(16000)}},
+		{"update omits unset, never null", "PUT", types.Int64Unknown(), types.Int64Null(), nil, nil, modelAPI{ContextWindow: i64p(200000), MaxOutputTokens: i64p(8000)}},
+		{"update sends only the one that is set", "PUT", types.Int64Value(64000), types.Int64Unknown(), float64(64000), nil, modelAPI{ContextWindow: i64p(64000), MaxOutputTokens: i64p(8000)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]any
+			r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == tc.method {
+					got = decodeBody(t, req)
+				}
+				out := tc.serverAnswer
+				out.ID, out.ModelID, out.ProviderID, out.ProviderModelID = "model_abc", "m", "p", "m"
+				out.Capability, out.ModelType, out.Enabled = "chat", "chat", true
+				_ = json.NewEncoder(w).Encode(out)
+			})
+			m := testWindowModel(tc.ctxWin, tc.maxOut)
+			if tc.method == "POST" {
+				resp := &resource.CreateResponse{State: mustModelState(t, m)}
+				r.Create(context.Background(), resource.CreateRequest{Plan: mustModelPlan(t, m)}, resp)
+				if resp.Diagnostics.HasError() {
+					t.Fatalf("create: %v", resp.Diagnostics)
+				}
+			} else {
+				resp := &resource.UpdateResponse{State: mustModelState(t, m)}
+				r.Update(context.Background(), resource.UpdateRequest{Plan: mustModelPlan(t, m), State: mustModelState(t, m)}, resp)
+				if resp.Diagnostics.HasError() {
+					t.Fatalf("update: %v", resp.Diagnostics)
+				}
+			}
+			if got == nil {
+				t.Fatalf("no %s captured", tc.method)
+			}
+			for key, want := range map[string]any{ctxKey: tc.wantCtx, maxKey: tc.wantMax} {
+				v, present := got[key]
+				if want == nil && present {
+					t.Errorf("%s must be omitted, got %v", key, v)
+				}
+				if want != nil && v != want {
+					t.Errorf("%s = %v, want %v", key, v, want)
+				}
+			}
+		})
+	}
+}
+
+func TestModelAdoptSendsWindowsOnlyWhenSet(t *testing.T) {
+	var put map[string]any
+	existing := modelAPI{ID: "model_d0da", ModelID: "m", ProviderID: "p", ProviderModelID: "m", Capability: "chat", ModelType: "chat", Enabled: true, ContextWindow: i64p(200000)}
+	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+		switch req.Method {
+		case "POST":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error_code":"E4090","detail":"exists"}`))
+		case "GET":
+			_ = json.NewEncoder(w).Encode([]modelAPI{existing})
+		case "PUT":
+			put = decodeBody(t, req)
+			_ = json.NewEncoder(w).Encode(existing)
+		}
+	})
+	m := testWindowModel(types.Int64Unknown(), types.Int64Value(8000))
+	resp := &resource.CreateResponse{State: mustModelState(t, m)}
+	r.Create(context.Background(), resource.CreateRequest{Plan: mustModelPlan(t, m)}, resp)
+	if put == nil {
+		t.Fatalf("no adopt PUT captured: %v", resp.Diagnostics)
+	}
+	if _, ok := put["contextWindow"]; ok {
+		t.Errorf("adopt PUT must omit the unset contextWindow, got %v", put["contextWindow"])
+	}
+	if put["maxOutputTokens"] != float64(8000) {
+		t.Errorf("adopt PUT maxOutputTokens = %v, want 8000", put["maxOutputTokens"])
+	}
+}
+
+func TestModelApplyFollowsWindows(t *testing.T) {
+	r := &modelResource{}
+	m := testWindowModel(types.Int64Unknown(), types.Int64Unknown())
+	r.apply(&m, &modelAPI{ID: "model_abc", ContextWindow: i64p(1000000)})
+	if m.ContextWindow.ValueInt64() != 1000000 {
+		t.Errorf("context_window must follow the API, got %v", m.ContextWindow)
+	}
+	if !m.MaxOutputTokens.IsNull() {
+		t.Errorf("an omitted max_output_tokens (unknown on the gateway) must read as null, got %v", m.MaxOutputTokens)
+	}
+}
+
+func TestAtLeastInt64Validator(t *testing.T) {
+	tests := []struct {
+		name    string
+		v       types.Int64
+		wantErr bool
+	}{
+		{"null passes", types.Int64Null(), false},
+		{"unknown passes", types.Int64Unknown(), false},
+		{"one passes", types.Int64Value(1), false},
+		{"zero refused", types.Int64Value(0), true},
+		{"negative refused", types.Int64Value(-5), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var resp validator.Int64Response
+			atLeastInt64(1).ValidateInt64(context.Background(), validator.Int64Request{Path: path.Root("context_window"), ConfigValue: tc.v}, &resp)
+			if resp.Diagnostics.HasError() != tc.wantErr {
+				t.Errorf("error = %v, want %v (%v)", resp.Diagnostics.HasError(), tc.wantErr, resp.Diagnostics)
+			}
+		})
+	}
+}
+
+func i64p(n int64) *int64 { return &n }
