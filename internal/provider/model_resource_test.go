@@ -8,8 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -138,6 +141,13 @@ func mustModelPlan(t *testing.T, m modelResourceModel) tfsdk.Plan {
 	return p
 }
 
+// mustModelConfig builds a tfsdk.Config holding the same raw value a State or
+// Plan would (tfsdk.Config has no Set).
+func mustModelConfig(t *testing.T, m modelResourceModel) tfsdk.Config {
+	t.Helper()
+	return tfsdk.Config{Schema: modelTestSchema(t).Schema, Raw: mustModelState(t, m).Raw}
+}
+
 func modelTestServer(t *testing.T, handler http.HandlerFunc) *modelResource {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -237,8 +247,9 @@ func TestModelUpdateAddressesByDocID(t *testing.T) {
 	}
 	resp := &resource.UpdateResponse{State: mustModelState(t, m)}
 	r.Update(context.Background(), resource.UpdateRequest{
-		Plan:  mustModelPlan(t, m),
-		State: mustModelState(t, m),
+		Plan:   mustModelPlan(t, m),
+		State:  mustModelState(t, m),
+		Config: mustModelConfig(t, m),
 	}, resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("update: %v", resp.Diagnostics)
@@ -570,7 +581,7 @@ func TestModelUpdateOmitsUnsetPricesAndForwardsAllowUnpriced(t *testing.T) {
 		CachedMicros:    types.Int64Null(),
 	}
 	resp := &resource.UpdateResponse{State: mustModelState(t, m)}
-	r.Update(context.Background(), resource.UpdateRequest{Plan: mustModelPlan(t, m), State: mustModelState(t, m)}, resp)
+	r.Update(context.Background(), resource.UpdateRequest{Plan: mustModelPlan(t, m), State: mustModelState(t, m), Config: mustModelConfig(t, m)}, resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("update: %v", resp.Diagnostics)
 	}
@@ -600,7 +611,7 @@ func TestModelUpdateSendsExplicitPrices(t *testing.T) {
 		InputMicros: types.Int64Value(5), OutputMicros: types.Int64Value(7),
 	}
 	resp := &resource.UpdateResponse{State: mustModelState(t, m)}
-	r.Update(context.Background(), resource.UpdateRequest{Plan: mustModelPlan(t, m), State: mustModelState(t, m)}, resp)
+	r.Update(context.Background(), resource.UpdateRequest{Plan: mustModelPlan(t, m), State: mustModelState(t, m), Config: mustModelConfig(t, m)}, resp)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("update: %v", resp.Diagnostics)
 	}
@@ -676,9 +687,10 @@ func TestModelCreateAdoptsOnConflictWithoutWipingPrice(t *testing.T) {
 // ── context_window / max_output_tokens (gateway >= 1.1.0) ──
 //
 // PUT is three-state on the gateway: absent = keep, null = clear, number = set.
-// An attribute that is unset in config (Optional+Computed, so unknown in the
-// plan) must therefore be OMITTED, never sent as null or 0, or Terraform would
-// wipe a window an admin set in the dashboard.
+// An attribute that is unset in CONFIG must be omitted from the request, never
+// sent as null or 0. Create takes its value from the plan (unknown exactly when
+// the config is null); Update takes it from the config, because
+// UseStateForUnknown plans an unset attribute as its state value.
 
 func testWindowModel(ctxWin, maxOut types.Int64) modelResourceModel {
 	return modelResourceModel{
@@ -689,21 +701,24 @@ func testWindowModel(ctxWin, maxOut types.Int64) modelResourceModel {
 }
 
 func TestModelWindowsOnTheWire(t *testing.T) {
-	const ctxKey, maxKey = "contextWindow", "maxOutputTokens"
+	unset := types.Int64Null()
+	v := types.Int64Value
 	tests := []struct {
-		name         string
-		method       string // POST (create) or PUT (update)
-		ctxWin       types.Int64
-		maxOut       types.Int64
-		wantCtx      any // nil = key must be absent
-		wantMax      any
-		serverAnswer modelAPI
+		name              string
+		method            string // POST (create) or PUT (update)
+		cfgCtx, cfgMax    types.Int64
+		planCtx, planMax  types.Int64 // what the plan holds (state value for an unset update attribute)
+		wantCtx, wantMax  any         // nil = key must be absent
+		server            modelAPI    // the gateway's answer; state must end up equal to it
+		wantErrContaining string
 	}{
-		{"create sends both when set", "POST", types.Int64Value(128000), types.Int64Value(16000), float64(128000), float64(16000), modelAPI{ContextWindow: i64p(128000), MaxOutputTokens: i64p(16000)}},
-		{"create omits both when unset", "POST", types.Int64Unknown(), types.Int64Null(), nil, nil, modelAPI{}},
-		{"update sends both when set", "PUT", types.Int64Value(128000), types.Int64Value(16000), float64(128000), float64(16000), modelAPI{ContextWindow: i64p(128000), MaxOutputTokens: i64p(16000)}},
-		{"update omits unset, never null", "PUT", types.Int64Unknown(), types.Int64Null(), nil, nil, modelAPI{ContextWindow: i64p(200000), MaxOutputTokens: i64p(8000)}},
-		{"update sends only the one that is set", "PUT", types.Int64Value(64000), types.Int64Unknown(), float64(64000), nil, modelAPI{ContextWindow: i64p(64000), MaxOutputTokens: i64p(8000)}},
+		{"create sends both when set", "POST", v(128000), v(16000), v(128000), v(16000), float64(128000), float64(16000), modelAPI{ContextWindow: i64p(128000), MaxOutputTokens: i64p(16000)}, ""},
+		{"create omits both when unset", "POST", unset, unset, types.Int64Unknown(), types.Int64Unknown(), nil, nil, modelAPI{}, ""},
+		{"update sends both when set", "PUT", v(128000), v(16000), v(128000), v(16000), float64(128000), float64(16000), modelAPI{ContextWindow: i64p(128000), MaxOutputTokens: i64p(16000)}, ""},
+		{"update with state value in plan but unset in config omits it", "PUT", unset, unset, v(200000), v(8000), nil, nil, modelAPI{ContextWindow: i64p(300000), MaxOutputTokens: i64p(8000)}, ""},
+		{"update sends only the one set in config", "PUT", v(64000), unset, v(64000), v(8000), float64(64000), nil, modelAPI{ContextWindow: i64p(64000), MaxOutputTokens: i64p(8000)}, ""},
+		{"create fails clearly on a gateway older than 1.1.0", "POST", v(128000), unset, v(128000), types.Int64Unknown(), float64(128000), nil, modelAPI{}, "gateway >= 1.1.0"},
+		{"update fails clearly on a gateway older than 1.1.0", "PUT", unset, v(16000), v(1), v(16000), nil, float64(16000), modelAPI{}, "gateway >= 1.1.0"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -712,67 +727,110 @@ func TestModelWindowsOnTheWire(t *testing.T) {
 				if req.Method == tc.method {
 					got = decodeBody(t, req)
 				}
-				out := tc.serverAnswer
+				out := tc.server
 				out.ID, out.ModelID, out.ProviderID, out.ProviderModelID = "model_abc", "m", "p", "m"
 				out.Capability, out.ModelType, out.Enabled = "chat", "chat", true
 				_ = json.NewEncoder(w).Encode(out)
 			})
-			m := testWindowModel(tc.ctxWin, tc.maxOut)
+			cfg := testWindowModel(tc.cfgCtx, tc.cfgMax)
+			plan := testWindowModel(tc.planCtx, tc.planMax)
+			var diags interface{ HasError() bool }
+			var state tfsdk.State
 			if tc.method == "POST" {
-				resp := &resource.CreateResponse{State: mustModelState(t, m)}
-				r.Create(context.Background(), resource.CreateRequest{Plan: mustModelPlan(t, m)}, resp)
-				if resp.Diagnostics.HasError() {
-					t.Fatalf("create: %v", resp.Diagnostics)
+				resp := &resource.CreateResponse{State: mustModelState(t, plan)}
+				r.Create(context.Background(), resource.CreateRequest{Plan: mustModelPlan(t, plan), Config: mustModelConfig(t, cfg)}, resp)
+				diags, state = resp.Diagnostics, resp.State
+				if tc.wantErrContaining != "" {
+					checkErr(t, resp.Diagnostics.Errors(), tc.wantErrContaining)
 				}
 			} else {
-				resp := &resource.UpdateResponse{State: mustModelState(t, m)}
-				r.Update(context.Background(), resource.UpdateRequest{Plan: mustModelPlan(t, m), State: mustModelState(t, m)}, resp)
-				if resp.Diagnostics.HasError() {
-					t.Fatalf("update: %v", resp.Diagnostics)
+				resp := &resource.UpdateResponse{State: mustModelState(t, plan)}
+				r.Update(context.Background(), resource.UpdateRequest{Plan: mustModelPlan(t, plan), State: mustModelState(t, plan), Config: mustModelConfig(t, cfg)}, resp)
+				diags, state = resp.Diagnostics, resp.State
+				if tc.wantErrContaining != "" {
+					checkErr(t, resp.Diagnostics.Errors(), tc.wantErrContaining)
 				}
 			}
 			if got == nil {
 				t.Fatalf("no %s captured", tc.method)
 			}
-			for key, want := range map[string]any{ctxKey: tc.wantCtx, maxKey: tc.wantMax} {
-				v, present := got[key]
+			for key, want := range map[string]any{"contextWindow": tc.wantCtx, "maxOutputTokens": tc.wantMax} {
+				val, present := got[key]
 				if want == nil && present {
-					t.Errorf("%s must be omitted, got %v", key, v)
+					t.Errorf("%s must be omitted, got %v", key, val)
 				}
-				if want != nil && v != want {
-					t.Errorf("%s = %v, want %v", key, v, want)
+				if want != nil && val != want {
+					t.Errorf("%s = %v, want %v", key, val, want)
 				}
+			}
+			if tc.wantErrContaining != "" {
+				if !diags.HasError() {
+					t.Fatal("want an error diagnostic, got none")
+				}
+				return
+			}
+			if diags.HasError() {
+				t.Fatalf("unexpected diagnostics: %v", diags)
+			}
+			var st modelResourceModel
+			if d := state.Get(context.Background(), &st); d.HasError() {
+				t.Fatalf("state get: %v", d)
+			}
+			if !st.ContextWindow.Equal(int64FromPtr(tc.server.ContextWindow)) || !st.MaxOutputTokens.Equal(int64FromPtr(tc.server.MaxOutputTokens)) {
+				t.Errorf("state windows = %v/%v, want the gateway's %v/%v", st.ContextWindow, st.MaxOutputTokens, int64FromPtr(tc.server.ContextWindow), int64FromPtr(tc.server.MaxOutputTokens))
 			}
 		})
 	}
 }
 
+func checkErr(t *testing.T, errs []diag.Diagnostic, want string) {
+	t.Helper()
+	for _, e := range errs {
+		if strings.Contains(e.Detail(), want) {
+			return
+		}
+	}
+	t.Errorf("no error detail contains %q: %v", want, errs)
+}
+
 func TestModelAdoptSendsWindowsOnlyWhenSet(t *testing.T) {
 	var put map[string]any
-	existing := modelAPI{ID: "model_d0da", ModelID: "m", ProviderID: "p", ProviderModelID: "m", Capability: "chat", ModelType: "chat", Enabled: true, ContextWindow: i64p(200000)}
+	doc := modelAPI{ID: "model_d0da", ModelID: "m", ProviderID: "p", ProviderModelID: "m", Capability: "chat", ModelType: "chat", Enabled: true, ContextWindow: i64p(200000)}
 	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
 		switch req.Method {
 		case "POST":
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"error_code":"E4090","detail":"exists"}`))
 		case "GET":
-			_ = json.NewEncoder(w).Encode([]modelAPI{existing})
+			_ = json.NewEncoder(w).Encode([]modelAPI{doc})
 		case "PUT":
 			put = decodeBody(t, req)
-			_ = json.NewEncoder(w).Encode(existing)
+			if v, ok := put["maxOutputTokens"].(float64); ok { // like the gateway: apply what was sent
+				n := int64(v)
+				doc.MaxOutputTokens = &n
+			}
+			_ = json.NewEncoder(w).Encode(doc)
 		}
 	})
 	m := testWindowModel(types.Int64Unknown(), types.Int64Value(8000))
+	cfg := testWindowModel(types.Int64Null(), types.Int64Value(8000))
 	resp := &resource.CreateResponse{State: mustModelState(t, m)}
-	r.Create(context.Background(), resource.CreateRequest{Plan: mustModelPlan(t, m)}, resp)
-	if put == nil {
-		t.Fatalf("no adopt PUT captured: %v", resp.Diagnostics)
+	r.Create(context.Background(), resource.CreateRequest{Plan: mustModelPlan(t, m), Config: mustModelConfig(t, cfg)}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("create/adopt: %v", resp.Diagnostics)
 	}
 	if _, ok := put["contextWindow"]; ok {
 		t.Errorf("adopt PUT must omit the unset contextWindow, got %v", put["contextWindow"])
 	}
 	if put["maxOutputTokens"] != float64(8000) {
 		t.Errorf("adopt PUT maxOutputTokens = %v, want 8000", put["maxOutputTokens"])
+	}
+	var st modelResourceModel
+	if d := resp.State.Get(context.Background(), &st); d.HasError() {
+		t.Fatalf("state get: %v", d)
+	}
+	if st.ContextWindow.ValueInt64() != 200000 || st.MaxOutputTokens.ValueInt64() != 8000 {
+		t.Errorf("state must follow the adopted doc, got %v/%v", st.ContextWindow, st.MaxOutputTokens)
 	}
 }
 
@@ -788,24 +846,49 @@ func TestModelApplyFollowsWindows(t *testing.T) {
 	}
 }
 
-func TestAtLeastInt64Validator(t *testing.T) {
-	tests := []struct {
-		name    string
-		v       types.Int64
-		wantErr bool
-	}{
-		{"null passes", types.Int64Null(), false},
-		{"unknown passes", types.Int64Unknown(), false},
-		{"one passes", types.Int64Value(1), false},
-		{"zero refused", types.Int64Value(0), true},
-		{"negative refused", types.Int64Value(-5), true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var resp validator.Int64Response
-			atLeastInt64(1).ValidateInt64(context.Background(), validator.Int64Request{Path: path.Root("context_window"), ConfigValue: tc.v}, &resp)
-			if resp.Diagnostics.HasError() != tc.wantErr {
-				t.Errorf("error = %v, want %v (%v)", resp.Diagnostics.HasError(), tc.wantErr, resp.Diagnostics)
+// The "no diff on the next plan" property comes entirely from the schema shape:
+// Optional+Computed with UseStateForUnknown (an attribute unset in config plans
+// as its state value), plus the at-least-1 validator. Removing any of them must
+// turn this test red.
+func TestModelWindowAttributesAreOptionalComputedKeptAndValidated(t *testing.T) {
+	r := &modelResource{}
+	var resp resource.SchemaResponse
+	r.Schema(context.Background(), resource.SchemaRequest{}, &resp)
+	ctx := context.Background()
+	ufu := int64planmodifier.UseStateForUnknown().Description(ctx)
+
+	for _, name := range []string{"context_window", "max_output_tokens"} {
+		t.Run(name, func(t *testing.T) {
+			attr, ok := resp.Schema.Attributes[name].(schema.Int64Attribute)
+			if !ok {
+				t.Fatalf("%s is %T, want schema.Int64Attribute", name, resp.Schema.Attributes[name])
+			}
+			if !attr.Optional || !attr.Computed || attr.Required || attr.Default != nil {
+				t.Errorf("%s must be Optional+Computed without Default/Required: %+v", name, attr)
+			}
+			kept := false
+			for _, pm := range attr.PlanModifiers {
+				if pm.Description(ctx) == ufu {
+					kept = true
+				}
+			}
+			if !kept {
+				t.Errorf("%s must carry UseStateForUnknown, got %d plan modifiers", name, len(attr.PlanModifiers))
+			}
+			if len(attr.Validators) == 0 {
+				t.Fatalf("%s has no validators", name)
+			}
+			for _, tc := range []struct {
+				v       types.Int64
+				wantErr bool
+			}{{types.Int64Value(0), true}, {types.Int64Value(-5), true}, {types.Int64Value(1), false}, {types.Int64Null(), false}, {types.Int64Unknown(), false}} {
+				var vresp validator.Int64Response
+				for _, val := range attr.Validators {
+					val.ValidateInt64(ctx, validator.Int64Request{Path: path.Root(name), ConfigValue: tc.v}, &vresp)
+				}
+				if vresp.Diagnostics.HasError() != tc.wantErr {
+					t.Errorf("%s value %v: error = %v, want %v", name, tc.v, vresp.Diagnostics.HasError(), tc.wantErr)
+				}
 			}
 		})
 	}

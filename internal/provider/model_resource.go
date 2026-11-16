@@ -151,14 +151,14 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"context_window": schema.Int64Attribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Context window of the model in tokens (gateway >= 1.1.0). Omitted = the gateway keeps whatever is stored (e.g. set in the dashboard); an unset value is never sent, so it is never cleared. Must be at least 1.",
+				Description:   "Context window of the model in tokens (gateway >= 1.1.0). Omitted = the gateway keeps whatever is stored (e.g. set in the dashboard): an attribute unset in the configuration is not sent, and never sent as null. Removing it from the configuration keeps the current value; Terraform cannot clear it, clear it in the dashboard. Must be at least 1.",
 				Validators:    []validator.Int64{atLeastInt64(1)},
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 			"max_output_tokens": schema.Int64Attribute{
 				Optional:      true,
 				Computed:      true,
-				Description:   "Maximum output tokens of the model (gateway >= 1.1.0). Omitted = the gateway keeps whatever is stored (e.g. set in the dashboard); an unset value is never sent, so it is never cleared. Must be at least 1.",
+				Description:   "Maximum output tokens of the model (gateway >= 1.1.0). Omitted = the gateway keeps whatever is stored (e.g. set in the dashboard): an attribute unset in the configuration is not sent, and never sent as null. Removing it from the configuration keeps the current value; Terraform cannot clear it, clear it in the dashboard. Must be at least 1.",
 				Validators:    []validator.Int64{atLeastInt64(1)},
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
@@ -336,6 +336,10 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		resp.Diagnostics.AddError("Create model failed", err.Error())
 		return
 	}
+	if err := checkWindowsEchoed(body.ContextWindow, body.MaxOutputTokens, &out); err != nil {
+		resp.Diagnostics.AddError("Create model failed", err.Error())
+		return
+	}
 	r.apply(&plan, &out)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
@@ -444,9 +448,10 @@ func (r *modelResource) Read(ctx context.Context, req resource.ReadRequest, resp
 }
 
 func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan, state modelResourceModel
+	var plan, state, cfg modelResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -472,9 +477,12 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		PriceRegion:     ptrIf(plan.PriceRegion),
 		ManagedBy:       ptrIf(plan.ManagedBy),
 		AllowUnpriced:   boolPtrIfTrue(plan.AllowUnpriced),
-		// Unset windows are omitted (gateway keeps the stored value), like prices.
-		ContextWindow:   int64PtrIf(plan.ContextWindow),
-		MaxOutputTokens: int64PtrIf(plan.MaxOutputTokens),
+		// The windows come from the CONFIG, not the plan: UseStateForUnknown plans
+		// an unset attribute as its (possibly stale) state value, and re-sending
+		// that would revert a dashboard edit. Unset in config => omitted, so the
+		// gateway keeps whatever it holds.
+		ContextWindow:   int64PtrIf(cfg.ContextWindow),
+		MaxOutputTokens: int64PtrIf(cfg.MaxOutputTokens),
 	}
 	// Address by the doc id from state (plan.ID may be unknown mid-plan);
 	// model_id is immutable (RequiresReplace), so the state's name is the
@@ -483,6 +491,10 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	var out modelAPI
 	if err := r.client.do(ctx, "PUT", p, nil, body, &out); err != nil {
 		resp.Diagnostics.AddError("Update model failed", modelErrDetail(err, byName))
+		return
+	}
+	if err := checkWindowsEchoed(body.ContextWindow, body.MaxOutputTokens, &out); err != nil {
+		resp.Diagnostics.AddError("Update model failed", err.Error())
 		return
 	}
 	r.apply(&plan, &out)
@@ -615,4 +627,23 @@ func (a atLeastInt64) ValidateInt64(ctx context.Context, req validator.Int64Requ
 		resp.Diagnostics.AddAttributeError(req.Path, "Invalid attribute value",
 			fmt.Sprintf("%s: got %d", a.Description(ctx), got))
 	}
+}
+
+// checkWindowsEchoed fails when a window that was sent comes back absent: a
+// gateway older than 1.1.0 ignores the fields and answers 200, and Terraform
+// would otherwise report an "inconsistent result" bug in the provider.
+func checkWindowsEchoed(sentCtx, sentMax *int64, out *modelAPI) error {
+	for _, w := range []struct {
+		name string
+		sent *int64
+		got  *int64
+	}{
+		{"context_window", sentCtx, out.ContextWindow},
+		{"max_output_tokens", sentMax, out.MaxOutputTokens},
+	} {
+		if w.sent != nil && w.got == nil {
+			return fmt.Errorf("the gateway ignored %s: it needs gateway >= 1.1.0; upgrade the gateway or remove the attribute", w.name)
+		}
+	}
+	return nil
 }
