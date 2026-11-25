@@ -15,6 +15,12 @@ resource "aigateway_cost_center" "customer_a" {
   auto_add_new_users = false
   fallback_chain     = [aigateway_cost_center.companygpt.id]
 
+  # Gateway >= 1.17.2: only these models/providers for people booked here.
+  model_access = {
+    allowed_models    = ["gpt-5.4"]
+    allowed_providers = ["azure-openai-eu"]
+  }
+
   sub_limits = [
     {
       scope_type = "provider"

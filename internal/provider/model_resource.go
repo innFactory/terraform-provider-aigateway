@@ -48,6 +48,7 @@ type modelResourceModel struct {
 	AllowUnpriced   types.Bool   `tfsdk:"allow_unpriced"`
 	ContextWindow   types.Int64  `tfsdk:"context_window"`
 	MaxOutputTokens types.Int64  `tfsdk:"max_output_tokens"`
+	SearchPerQuery  types.Int64  `tfsdk:"search_per_query_microdollars"`
 	ID              types.String `tfsdk:"id"`
 }
 
@@ -162,6 +163,11 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Validators:    []validator.Int64{atLeastInt64(1)},
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
+			"search_per_query_microdollars": schema.Int64Attribute{
+				Optional:    true,
+				Description: "The model's own price per provider-run web search (web search, grounding with Google or Bing), per ONE search, in microdollars (gateway >= 1.17.2). Without a price of its own the gateway applies the provider's list price. Omitted = Terraform does not manage it: nothing is sent and nothing is read back, so a price set in the dashboard stays. Removing it from the configuration keeps the current value; clear it in the dashboard. Must not be negative.",
+				Validators:  []validator.Int64{atLeastInt64(0)},
+			},
 			"managed_by": schema.StringAttribute{
 				Optional:    true,
 				Description: "Free-form marker stored on the gateway object (e.g. companygpt-terraform) so the UI can flag IaC-managed providers/models.",
@@ -201,6 +207,8 @@ type modelCreateBody struct {
 	// Optional positive integers on the gateway; omitted = unknown.
 	ContextWindow   *int64 `json:"contextWindow,omitempty"`
 	MaxOutputTokens *int64 `json:"maxOutputTokens,omitempty"`
+	// Omitted = not managed. An explicit 0 is sent as 0.
+	SearchPerQuery *int64 `json:"searchPerQueryMicrodollars,omitempty"`
 }
 
 type modelUpdateBody struct {
@@ -223,6 +231,7 @@ type modelUpdateBody struct {
 	// omitempty on a nil pointer means ABSENT; this body can never send null.
 	ContextWindow   *int64 `json:"contextWindow,omitempty"`
 	MaxOutputTokens *int64 `json:"maxOutputTokens,omitempty"`
+	SearchPerQuery  *int64 `json:"searchPerQueryMicrodollars,omitempty"`
 }
 
 type modelAPI struct {
@@ -244,6 +253,8 @@ type modelAPI struct {
 	// The gateway omits both when unknown.
 	ContextWindow   *int64 `json:"contextWindow"`
 	MaxOutputTokens *int64 `json:"maxOutputTokens"`
+	// The gateway omits it when the model has no price of its own (0).
+	SearchPerQuery *int64 `json:"searchPerQueryMicrodollars"`
 }
 
 func defStr(v types.String, def string) string {
@@ -314,6 +325,7 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		AllowUnpriced:   defBool(plan.AllowUnpriced, false),
 		ContextWindow:   int64PtrIf(plan.ContextWindow),
 		MaxOutputTokens: int64PtrIf(plan.MaxOutputTokens),
+		SearchPerQuery:  int64PtrIf(plan.SearchPerQuery),
 	}
 	var out modelAPI
 	err := r.client.do(ctx, "POST", "/api/v1/admin/models", nil, body, &out)
@@ -337,6 +349,10 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 	if err := checkWindowsEchoed(body.ContextWindow, body.MaxOutputTokens, &out); err != nil {
+		resp.Diagnostics.AddError("Create model failed", err.Error())
+		return
+	}
+	if err := checkSearchPriceEchoed(body.SearchPerQuery, &out); err != nil {
 		resp.Diagnostics.AddError("Create model failed", err.Error())
 		return
 	}
@@ -383,6 +399,7 @@ func (r *modelResource) adoptExistingModel(ctx context.Context, plan *modelResou
 		AllowUnpriced:   boolPtrIfTrue(plan.AllowUnpriced),
 		ContextWindow:   int64PtrIf(plan.ContextWindow),
 		MaxOutputTokens: int64PtrIf(plan.MaxOutputTokens),
+		SearchPerQuery:  int64PtrIf(plan.SearchPerQuery),
 	}
 	var out modelAPI
 	if err := r.client.do(ctx, "PUT", "/api/v1/admin/models/"+match.ID, nil, upd, &out); err != nil {
@@ -483,6 +500,7 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		// gateway keeps whatever it holds.
 		ContextWindow:   int64PtrIf(cfg.ContextWindow),
 		MaxOutputTokens: int64PtrIf(cfg.MaxOutputTokens),
+		SearchPerQuery:  int64PtrIf(plan.SearchPerQuery),
 	}
 	// Address by the doc id from state (plan.ID may be unknown mid-plan);
 	// model_id is immutable (RequiresReplace), so the state's name is the
@@ -494,6 +512,10 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 	if err := checkWindowsEchoed(body.ContextWindow, body.MaxOutputTokens, &out); err != nil {
+		resp.Diagnostics.AddError("Update model failed", err.Error())
+		return
+	}
+	if err := checkSearchPriceEchoed(body.SearchPerQuery, &out); err != nil {
 		resp.Diagnostics.AddError("Update model failed", err.Error())
 		return
 	}
@@ -581,6 +603,15 @@ func (r *modelResource) apply(m *modelResourceModel, a *modelAPI) {
 	m.IsDefault = types.BoolValue(a.IsDefault)
 	m.ContextWindow = int64FromPtr(a.ContextWindow)
 	m.MaxOutputTokens = int64FromPtr(a.MaxOutputTokens)
+	// search_per_query_microdollars is Optional-only: reflect only when the model
+	// already carries a value (config set it). The gateway omits a 0 price.
+	if !m.SearchPerQuery.IsNull() && !m.SearchPerQuery.IsUnknown() {
+		if a.SearchPerQuery != nil {
+			m.SearchPerQuery = types.Int64Value(*a.SearchPerQuery)
+		} else {
+			m.SearchPerQuery = types.Int64Value(0)
+		}
+	}
 	// price_region is Optional (not Computed): only reflect a server value when
 	// the response carries one, otherwise keep the planned/null value to avoid
 	// "inconsistent result" errors when unset.
@@ -644,6 +675,15 @@ func checkWindowsEchoed(sentCtx, sentMax *int64, out *modelAPI) error {
 		if w.sent != nil && w.got == nil {
 			return fmt.Errorf("the gateway ignored %s: it needs gateway >= 1.1.0; upgrade the gateway or remove the attribute", w.name)
 		}
+	}
+	return nil
+}
+
+// checkSearchPriceEchoed fails when a positive price that was sent comes back
+// absent: a gateway older than 1.17.2 ignores the field and answers 200.
+func checkSearchPriceEchoed(sent *int64, out *modelAPI) error {
+	if sent != nil && *sent > 0 && out.SearchPerQuery == nil {
+		return fmt.Errorf("the gateway ignored search_per_query_microdollars: it needs gateway >= 1.17.2; upgrade the gateway or remove the attribute")
 	}
 	return nil
 }

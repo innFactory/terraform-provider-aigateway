@@ -2,7 +2,9 @@ package provider
 
 import (
 	"context"
+	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -12,9 +14,10 @@ import (
 )
 
 var (
-	_ resource.Resource                = (*costCenterResource)(nil)
-	_ resource.ResourceWithConfigure   = (*costCenterResource)(nil)
-	_ resource.ResourceWithImportState = (*costCenterResource)(nil)
+	_ resource.Resource                   = (*costCenterResource)(nil)
+	_ resource.ResourceWithConfigure      = (*costCenterResource)(nil)
+	_ resource.ResourceWithImportState    = (*costCenterResource)(nil)
+	_ resource.ResourceWithValidateConfig = (*costCenterResource)(nil)
 )
 
 type costCenterResource struct {
@@ -26,19 +29,104 @@ func newCostCenterResource() resource.Resource {
 }
 
 type costCenterResourceModel struct {
-	ID              types.String    `tfsdk:"id"`
-	Name            types.String    `tfsdk:"name"`
-	Currency        types.String    `tfsdk:"currency"`
-	Description     types.String    `tfsdk:"description"`
-	IsOrg           types.Bool      `tfsdk:"is_org"`
-	Mode            types.String    `tfsdk:"mode"`
-	MonthlyCap      types.String    `tfsdk:"monthly_cap"`
-	WeeklyCap       types.String    `tfsdk:"weekly_cap"`
-	DailyCap        types.String    `tfsdk:"daily_cap"`
-	AutoAddNewUsers types.Bool      `tfsdk:"auto_add_new_users"`
-	AgentID         types.String    `tfsdk:"agent_id"`
-	FallbackChain   types.List      `tfsdk:"fallback_chain"`
-	SubLimits       []subLimitModel `tfsdk:"sub_limits"`
+	ID              types.String      `tfsdk:"id"`
+	Name            types.String      `tfsdk:"name"`
+	Currency        types.String      `tfsdk:"currency"`
+	Description     types.String      `tfsdk:"description"`
+	IsOrg           types.Bool        `tfsdk:"is_org"`
+	Mode            types.String      `tfsdk:"mode"`
+	MonthlyCap      types.String      `tfsdk:"monthly_cap"`
+	WeeklyCap       types.String      `tfsdk:"weekly_cap"`
+	DailyCap        types.String      `tfsdk:"daily_cap"`
+	AutoAddNewUsers types.Bool        `tfsdk:"auto_add_new_users"`
+	AgentID         types.String      `tfsdk:"agent_id"`
+	FallbackChain   types.List        `tfsdk:"fallback_chain"`
+	SubLimits       []subLimitModel   `tfsdk:"sub_limits"`
+	ModelAccess     *modelAccessModel `tfsdk:"model_access"`
+}
+
+// modelAccessModel is the per-cost-center model allowlist (gateway >= 1.17.2).
+type modelAccessModel struct {
+	AllowedModels    types.List `tfsdk:"allowed_models"`
+	AllowedProviders types.List `tfsdk:"allowed_providers"`
+}
+
+// modelAccessBody is the wire shape. Both lists are always sent (an empty array
+// for a list the config leaves out) so the gateway never sees a half object.
+type modelAccessBody struct {
+	AllowedModels    []string `json:"allowedModels"`
+	AllowedProviders []string `json:"allowedProviders"`
+}
+
+type modelAccessAPI struct {
+	AllowedModels    []string `json:"allowedModels"`
+	AllowedProviders []string `json:"allowedProviders"`
+}
+
+// modelAccessBodyOf maps the config object to the request body; nil (not
+// managed) yields nil so the key is omitted.
+func modelAccessBodyOf(ctx context.Context, m *modelAccessModel) *modelAccessBody {
+	if m == nil {
+		return nil
+	}
+	b := &modelAccessBody{AllowedModels: listOrNil(ctx, m.AllowedModels), AllowedProviders: listOrNil(ctx, m.AllowedProviders)}
+	if b.AllowedModels == nil {
+		b.AllowedModels = []string{}
+	}
+	if b.AllowedProviders == nil {
+		b.AllowedProviders = []string{}
+	}
+	return b
+}
+
+// validateModelAccess mirrors the gateway's 400 for an allowlist that lists
+// nothing after trimming. An unknown list defers the check to apply time.
+func validateModelAccess(ctx context.Context, m *modelAccessModel) string {
+	if m == nil || m.AllowedModels.IsUnknown() || m.AllowedProviders.IsUnknown() {
+		return ""
+	}
+	for _, l := range []types.List{m.AllowedModels, m.AllowedProviders} {
+		for _, e := range listOrNil(ctx, l) {
+			if strings.TrimSpace(e) != "" {
+				return ""
+			}
+		}
+	}
+	return "model_access must list at least one model or provider; remove model_access to allow every model"
+}
+
+// modelAccessFromAPI reflects the server lists onto the prior object. A list
+// the server holds empty stays null when the config left it null, so a
+// one-sided allowlist round-trips without an inconsistent result.
+func modelAccessFromAPI(prior *modelAccessModel, a *modelAccessAPI) *modelAccessModel {
+	toList := func(prior types.List, server []string) types.List {
+		if len(server) == 0 {
+			if prior.IsNull() || prior.IsUnknown() {
+				return types.ListNull(types.StringType)
+			}
+			return types.ListValueMust(types.StringType, []attr.Value{})
+		}
+		elems := make([]attr.Value, len(server))
+		for i, v := range server {
+			elems[i] = types.StringValue(v)
+		}
+		return types.ListValueMust(types.StringType, elems)
+	}
+	return &modelAccessModel{
+		AllowedModels:    toList(prior.AllowedModels, a.AllowedModels),
+		AllowedProviders: toList(prior.AllowedProviders, a.AllowedProviders),
+	}
+}
+
+func (r *costCenterResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var ma *modelAccessModel
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("model_access"), &ma)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if msg := validateModelAccess(ctx, ma); msg != "" {
+		resp.Diagnostics.AddAttributeError(path.Root("model_access"), "Invalid model_access", msg)
+	}
 }
 
 type subLimitModel struct {
@@ -122,6 +210,22 @@ func (r *costCenterResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				ElementType: types.StringType,
 				Description: "Ordered list of cost center (budget) ids to fall back to when this center is exhausted.",
 			},
+			"model_access": schema.SingleNestedAttribute{
+				Optional:    true,
+				Description: "Models and providers the people booked on this cost center may use (gateway >= 1.17.2). A model is granted when its id or its provider id is listed. List at least one model or provider; `terraform plan` fails on an empty allowlist. Omitted = Terraform does not manage it: nothing is sent and nothing is read back, so a list set in the dashboard stays. Removing the block does NOT clear a list on the gateway; clear it in the dashboard.",
+				Attributes: map[string]schema.Attribute{
+					"allowed_models": schema.ListAttribute{
+						Optional:    true,
+						ElementType: types.StringType,
+						Description: "Model ids the cost center may use.",
+					},
+					"allowed_providers": schema.ListAttribute{
+						Optional:    true,
+						ElementType: types.StringType,
+						Description: "Provider ids the cost center may use; every model of a listed provider is granted.",
+					},
+				},
+			},
 			"sub_limits": schema.ListNestedAttribute{
 				Optional:    true,
 				Description: "Fine-grained caps within this budget, scoped to a provider/model/alias/router. Server sub-limits are reflected into state on Read, so out-of-band changes surface as drift in `terraform plan` and are self-healed (reverted to the Terraform-desired config) on the next apply.",
@@ -166,17 +270,18 @@ func (r *costCenterResource) Configure(_ context.Context, req resource.Configure
 }
 
 type costCenterCreateBody struct {
-	Name            string   `json:"name"`
-	Currency        string   `json:"currency"`
-	Description     *string  `json:"description,omitempty"`
-	IsOrg           *bool    `json:"isOrg,omitempty"`
-	Mode            *string  `json:"mode,omitempty"`
-	MonthlyCap      *string  `json:"monthlyCap,omitempty"`
-	WeeklyCap       *string  `json:"weeklyCap,omitempty"`
-	DailyCap        *string  `json:"dailyCap,omitempty"`
-	AgentID         *string  `json:"agentId,omitempty"`
-	AutoAddNewUsers *bool    `json:"autoAddNewUsers,omitempty"`
-	FallbackChain   []string `json:"fallbackChain,omitempty"`
+	Name            string           `json:"name"`
+	Currency        string           `json:"currency"`
+	Description     *string          `json:"description,omitempty"`
+	IsOrg           *bool            `json:"isOrg,omitempty"`
+	Mode            *string          `json:"mode,omitempty"`
+	MonthlyCap      *string          `json:"monthlyCap,omitempty"`
+	WeeklyCap       *string          `json:"weeklyCap,omitempty"`
+	DailyCap        *string          `json:"dailyCap,omitempty"`
+	AgentID         *string          `json:"agentId,omitempty"`
+	AutoAddNewUsers *bool            `json:"autoAddNewUsers,omitempty"`
+	FallbackChain   []string         `json:"fallbackChain,omitempty"`
+	ModelAccess     *modelAccessBody `json:"modelAccess,omitempty"`
 }
 
 // costCenterUpdateBody: caps are NON-omitempty pointers so a nil pointer
@@ -192,22 +297,26 @@ type costCenterUpdateBody struct {
 	DailyCap        *string  `json:"dailyCap"`
 	AutoAddNewUsers *bool    `json:"autoAddNewUsers,omitempty"`
 	FallbackChain   []string `json:"fallbackChain,omitempty"`
+	// Absent = unchanged on the gateway. This body never sends null: removing
+	// model_access from the config does not clear it (not managed).
+	ModelAccess *modelAccessBody `json:"modelAccess,omitempty"`
 }
 
 type costCenterAPI struct {
-	ID              string        `json:"id"`
-	Name            string        `json:"name"`
-	Currency        string        `json:"currency"`
-	Description     string        `json:"description"`
-	Mode            string        `json:"mode"`
-	MonthlyCap      *capString    `json:"monthlyCap"`
-	WeeklyCap       *capString    `json:"weeklyCap"`
-	DailyCap        *capString    `json:"dailyCap"`
-	AgentID         *string       `json:"agentId"`
-	AutoAddNewUsers bool          `json:"autoAddNewUsers"`
-	FallbackChain   []string      `json:"fallbackChain"`
-	IsOrg           bool          `json:"isOrg"`
-	SubLimits       []subLimitAPI `json:"subLimits"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	Currency        string          `json:"currency"`
+	Description     string          `json:"description"`
+	Mode            string          `json:"mode"`
+	MonthlyCap      *capString      `json:"monthlyCap"`
+	WeeklyCap       *capString      `json:"weeklyCap"`
+	DailyCap        *capString      `json:"dailyCap"`
+	AgentID         *string         `json:"agentId"`
+	AutoAddNewUsers bool            `json:"autoAddNewUsers"`
+	FallbackChain   []string        `json:"fallbackChain"`
+	IsOrg           bool            `json:"isOrg"`
+	SubLimits       []subLimitAPI   `json:"subLimits"`
+	ModelAccess     *modelAccessAPI `json:"modelAccess"`
 }
 
 type subLimitScopeBody struct {
@@ -359,6 +468,7 @@ func (r *costCenterResource) Create(ctx context.Context, req resource.CreateRequ
 		AgentID:         ptrIf(plan.AgentID),
 		AutoAddNewUsers: boolPtr(plan.AutoAddNewUsers),
 		FallbackChain:   listOrNil(ctx, plan.FallbackChain),
+		ModelAccess:     modelAccessBodyOf(ctx, plan.ModelAccess),
 	}
 	var out costCenterAPI
 	if err := r.client.do(ctx, "POST", "/api/v1/admin/budgets", nil, body, &out); err != nil {
@@ -419,6 +529,7 @@ func (r *costCenterResource) Update(ctx context.Context, req resource.UpdateRequ
 		DailyCap:        ptrIf(plan.DailyCap),
 		AutoAddNewUsers: boolPtr(plan.AutoAddNewUsers),
 		FallbackChain:   listOrNil(ctx, plan.FallbackChain),
+		ModelAccess:     modelAccessBodyOf(ctx, plan.ModelAccess),
 	}
 	var out costCenterAPI
 	if err := r.client.do(ctx, "PATCH", "/api/v1/admin/budgets/"+state.ID.ValueString(), nil, body, &out); err != nil {
@@ -533,6 +644,17 @@ func (r *costCenterResource) apply(m *costCenterResourceModel, a *costCenterAPI,
 	// carries a known value, to avoid an inconsistent-result vs a null plan.
 	if !m.AutoAddNewUsers.IsNull() && !m.AutoAddNewUsers.IsUnknown() {
 		m.AutoAddNewUsers = types.BoolValue(a.AutoAddNewUsers)
+	}
+	// model_access is Optional-only: reflect only when this resource manages it
+	// (the model already carries an object). Otherwise a list set in the
+	// dashboard would show as a perpetual "remove model_access" diff. A list
+	// cleared on the gateway reads as null, so the drift shows and is re-applied.
+	if m.ModelAccess != nil {
+		if a.ModelAccess != nil {
+			m.ModelAccess = modelAccessFromAPI(m.ModelAccess, a.ModelAccess)
+		} else {
+			m.ModelAccess = nil
+		}
 	}
 	// fallback_chain is Optional-only and NOT reflected here (leave the configured
 	// value) — the gateway stores it but reflecting an empty server list onto a
