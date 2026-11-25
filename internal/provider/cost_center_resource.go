@@ -58,11 +58,6 @@ type modelAccessBody struct {
 	AllowedProviders []string `json:"allowedProviders"`
 }
 
-type modelAccessAPI struct {
-	AllowedModels    []string `json:"allowedModels"`
-	AllowedProviders []string `json:"allowedProviders"`
-}
-
 // modelAccessBodyOf maps the config object to the request body; nil (not
 // managed) yields nil so the key is omitted.
 func modelAccessBodyOf(ctx context.Context, m *modelAccessModel) *modelAccessBody {
@@ -80,25 +75,32 @@ func modelAccessBodyOf(ctx context.Context, m *modelAccessModel) *modelAccessBod
 }
 
 // validateModelAccess mirrors the gateway's 400 for an allowlist that lists
-// nothing after trimming. An unknown list defers the check to apply time.
+// nothing, and refuses blank or untrimmed entries: the gateway stores trimmed
+// lists without blanks, so such an entry would come back different from the
+// plan. An unknown list defers the check to apply time.
 func validateModelAccess(ctx context.Context, m *modelAccessModel) string {
 	if m == nil || m.AllowedModels.IsUnknown() || m.AllowedProviders.IsUnknown() {
 		return ""
 	}
+	n := 0
 	for _, l := range []types.List{m.AllowedModels, m.AllowedProviders} {
 		for _, e := range listOrNil(ctx, l) {
-			if strings.TrimSpace(e) != "" {
-				return ""
+			if e == "" || e != strings.TrimSpace(e) {
+				return "model_access entries must be non-blank and must not start or end with whitespace"
 			}
+			n++
 		}
 	}
-	return "model_access must list at least one model or provider; remove model_access to allow every model"
+	if n == 0 {
+		return "model_access must list at least one model or provider; remove model_access to allow every model"
+	}
+	return ""
 }
 
 // modelAccessFromAPI reflects the server lists onto the prior object. A list
 // the server holds empty stays null when the config left it null, so a
 // one-sided allowlist round-trips without an inconsistent result.
-func modelAccessFromAPI(prior *modelAccessModel, a *modelAccessAPI) *modelAccessModel {
+func modelAccessFromAPI(prior *modelAccessModel, a *modelAccessBody) *modelAccessModel {
 	toList := func(prior types.List, server []string) types.List {
 		if len(server) == 0 {
 			if prior.IsNull() || prior.IsUnknown() {
@@ -303,20 +305,20 @@ type costCenterUpdateBody struct {
 }
 
 type costCenterAPI struct {
-	ID              string          `json:"id"`
-	Name            string          `json:"name"`
-	Currency        string          `json:"currency"`
-	Description     string          `json:"description"`
-	Mode            string          `json:"mode"`
-	MonthlyCap      *capString      `json:"monthlyCap"`
-	WeeklyCap       *capString      `json:"weeklyCap"`
-	DailyCap        *capString      `json:"dailyCap"`
-	AgentID         *string         `json:"agentId"`
-	AutoAddNewUsers bool            `json:"autoAddNewUsers"`
-	FallbackChain   []string        `json:"fallbackChain"`
-	IsOrg           bool            `json:"isOrg"`
-	SubLimits       []subLimitAPI   `json:"subLimits"`
-	ModelAccess     *modelAccessAPI `json:"modelAccess"`
+	ID              string           `json:"id"`
+	Name            string           `json:"name"`
+	Currency        string           `json:"currency"`
+	Description     string           `json:"description"`
+	Mode            string           `json:"mode"`
+	MonthlyCap      *capString       `json:"monthlyCap"`
+	WeeklyCap       *capString       `json:"weeklyCap"`
+	DailyCap        *capString       `json:"dailyCap"`
+	AgentID         *string          `json:"agentId"`
+	AutoAddNewUsers bool             `json:"autoAddNewUsers"`
+	FallbackChain   []string         `json:"fallbackChain"`
+	IsOrg           bool             `json:"isOrg"`
+	SubLimits       []subLimitAPI    `json:"subLimits"`
+	ModelAccess     *modelAccessBody `json:"modelAccess"`
 }
 
 type subLimitScopeBody struct {

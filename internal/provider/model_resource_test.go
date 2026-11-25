@@ -974,19 +974,6 @@ func TestModelApplySearchPriceOnlyWhenManaged(t *testing.T) {
 	}
 }
 
-// A gateway that ignores the field answers 200 without it; that must be a clear
-// error, not an inconsistent-result bug report.
-func TestModelSearchPriceIgnoredByOldGatewayErrors(t *testing.T) {
-	r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
-		_ = json.NewEncoder(w).Encode(modelAPI{ID: "model_abc", ModelID: "m", ProviderID: "p", ProviderModelID: "m", Capability: "chat", ModelType: "chat", Enabled: true})
-	})
-	m := testWindowModel(types.Int64Null(), types.Int64Null())
-	m.SearchPerQuery = types.Int64Value(14000)
-	resp := &resource.CreateResponse{State: mustModelState(t, m)}
-	r.Create(context.Background(), resource.CreateRequest{Plan: mustModelPlan(t, m), Config: mustModelConfig(t, m)}, resp)
-	checkErr(t, resp.Diagnostics.Errors(), "gateway >= 1.17.2")
-}
-
 func TestModelSearchPriceRejectsNegative(t *testing.T) {
 	var resp resource.SchemaResponse
 	(&modelResource{}).Schema(context.Background(), resource.SchemaRequest{}, &resp)

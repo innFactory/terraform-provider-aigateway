@@ -90,7 +90,7 @@ func TestCostCenterModelAccessOnTheWire(t *testing.T) {
 				}
 				out := costCenterAPI{ID: "budget_1", Name: "cc", Currency: "EUR"}
 				if tc.access != nil {
-					out.ModelAccess = &modelAccessAPI{AllowedModels: listOrNil(context.Background(), tc.access.AllowedModels), AllowedProviders: listOrNil(context.Background(), tc.access.AllowedProviders)}
+					out.ModelAccess = &modelAccessBody{AllowedModels: listOrNil(context.Background(), tc.access.AllowedModels), AllowedProviders: listOrNil(context.Background(), tc.access.AllowedProviders)}
 				}
 				_ = json.NewEncoder(w).Encode(out)
 			})
@@ -133,7 +133,7 @@ func TestCostCenterModelAccessOnTheWire(t *testing.T) {
 // managed); while managed, the server value is reflected (drift shows).
 func TestCostCenterApplyModelAccessOnlyWhenManaged(t *testing.T) {
 	r := &costCenterResource{}
-	server := &costCenterAPI{ID: "b", Name: "cc", Currency: "EUR", ModelAccess: &modelAccessAPI{AllowedModels: []string{"gpt-5.4"}}}
+	server := &costCenterAPI{ID: "b", Name: "cc", Currency: "EUR", ModelAccess: &modelAccessBody{AllowedModels: []string{"gpt-5.4"}}}
 
 	unmanaged := &costCenterResourceModel{}
 	r.apply(unmanaged, server, "EUR")
@@ -172,6 +172,10 @@ func TestModelAccessValidate(t *testing.T) {
 		{"both null", modelAccessModel{AllowedModels: types.ListNull(types.StringType), AllowedProviders: types.ListNull(types.StringType)}, true},
 		{"both empty", modelAccessModel{AllowedModels: strListOf(), AllowedProviders: strListOf()}, true},
 		{"blank entries only", modelAccessModel{AllowedModels: strListOf("  ", ""), AllowedProviders: strListOf(" ")}, true},
+		{"leading space", modelAccessModel{AllowedModels: strListOf(" m1"), AllowedProviders: types.ListNull(types.StringType)}, true},
+		{"trailing space", modelAccessModel{AllowedModels: strListOf("m1 "), AllowedProviders: types.ListNull(types.StringType)}, true},
+		{"empty entry beside a good one", modelAccessModel{AllowedModels: strListOf("m1", ""), AllowedProviders: types.ListNull(types.StringType)}, true},
+		{"whitespace entry in providers", modelAccessModel{AllowedModels: strListOf("m1"), AllowedProviders: strListOf("  ")}, true},
 		{"unknown list defers", modelAccessModel{AllowedModels: unknown, AllowedProviders: types.ListNull(types.StringType)}, false},
 	}
 	for _, tc := range tests {
@@ -180,8 +184,8 @@ func TestModelAccessValidate(t *testing.T) {
 			if (msg != "") != tc.wantErr {
 				t.Errorf("validateModelAccess = %q, wantErr %v", msg, tc.wantErr)
 			}
-			if tc.wantErr && !strings.Contains(msg, "remove model_access to allow every model") {
-				t.Errorf("message must tell the fix, got %q", msg)
+			if tc.wantErr && !strings.Contains(msg, "model_access") {
+				t.Errorf("message must name the attribute, got %q", msg)
 			}
 		})
 	}

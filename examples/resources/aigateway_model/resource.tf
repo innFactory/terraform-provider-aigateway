@@ -20,6 +20,6 @@ resource "aigateway_model" "gpt_5_4_mini_windows" {
   context_window    = 400000
   max_output_tokens = 128000
 
-  # Gateway >= 1.17.2: price of ONE provider-run web search, in microdollars.
+  # Price of ONE provider-run web search, in microdollars (gateway 1.17.2 bills searches with it).
   search_per_query_microdollars = 14000
 }

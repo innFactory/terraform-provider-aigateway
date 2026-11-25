@@ -165,7 +165,7 @@ func (r *modelResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			},
 			"search_per_query_microdollars": schema.Int64Attribute{
 				Optional:    true,
-				Description: "The model's own price per provider-run web search (web search, grounding with Google or Bing), per ONE search, in microdollars (gateway >= 1.17.2). Without a price of its own the gateway applies the provider's list price. Omitted = Terraform does not manage it: nothing is sent and nothing is read back, so a price set in the dashboard stays. Removing it from the configuration keeps the current value; clear it in the dashboard. Must not be negative.",
+				Description: "The model's own price per provider-run web search (web search, grounding with Google or Bing), per ONE search, in microdollars. The admin API has long had this field; gateway 1.17.2 starts using it (with list-price fallbacks when it is 0) to bill provider-run web search and grounding. Omitted = Terraform does not manage it: nothing is sent and nothing is read back, so a price set in the dashboard stays. Removing it from the configuration keeps the current value; clear it in the dashboard. Must not be negative.",
 				Validators:  []validator.Int64{atLeastInt64(0)},
 			},
 			"managed_by": schema.StringAttribute{
@@ -352,10 +352,6 @@ func (r *modelResource) Create(ctx context.Context, req resource.CreateRequest, 
 		resp.Diagnostics.AddError("Create model failed", err.Error())
 		return
 	}
-	if err := checkSearchPriceEchoed(body.SearchPerQuery, &out); err != nil {
-		resp.Diagnostics.AddError("Create model failed", err.Error())
-		return
-	}
 	r.apply(&plan, &out)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
@@ -515,10 +511,6 @@ func (r *modelResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		resp.Diagnostics.AddError("Update model failed", err.Error())
 		return
 	}
-	if err := checkSearchPriceEchoed(body.SearchPerQuery, &out); err != nil {
-		resp.Diagnostics.AddError("Update model failed", err.Error())
-		return
-	}
 	r.apply(&plan, &out)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
@@ -675,15 +667,6 @@ func checkWindowsEchoed(sentCtx, sentMax *int64, out *modelAPI) error {
 		if w.sent != nil && w.got == nil {
 			return fmt.Errorf("the gateway ignored %s: it needs gateway >= 1.1.0; upgrade the gateway or remove the attribute", w.name)
 		}
-	}
-	return nil
-}
-
-// checkSearchPriceEchoed fails when a positive price that was sent comes back
-// absent: a gateway older than 1.17.2 ignores the field and answers 200.
-func checkSearchPriceEchoed(sent *int64, out *modelAPI) error {
-	if sent != nil && *sent > 0 && out.SearchPerQuery == nil {
-		return fmt.Errorf("the gateway ignored search_per_query_microdollars: it needs gateway >= 1.17.2; upgrade the gateway or remove the attribute")
 	}
 	return nil
 }
