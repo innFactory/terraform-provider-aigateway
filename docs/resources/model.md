@@ -34,6 +34,9 @@ resource "aigateway_model" "gpt_5_4_mini_windows" {
 
   context_window    = 400000
   max_output_tokens = 128000
+
+  # Price of ONE provider-run web search, in microdollars (gateway 1.17.2 bills searches with it).
+  search_per_query_microdollars = 14000
 }
 ```
 
@@ -61,6 +64,7 @@ resource "aigateway_model" "gpt_5_4_mini_windows" {
 - `max_output_tokens` (Number) Maximum output tokens of the model (gateway >= 1.1.0). Omitted = the gateway keeps whatever is stored (e.g. set in the dashboard); an attribute unset in the configuration is not sent, and never sent as null. Removing it from the configuration keeps the current value; Terraform cannot clear it, clear it in the dashboard. Must be at least 1.
 - `model_type` (String) chat | embedding | image | audio. Defaults to chat.
 - `output_per_1m_tokens_microdollars` (Number) Output token price per 1M tokens in microdollars. Leave it unset to keep the price the gateway holds (e.g. one confirmed from ai-prices.eu) — unset values are omitted from update requests, never sent as 0.
+- `search_per_query_microdollars` (Number) The model's own price per provider-run web search (web search, grounding with Google or Bing), per ONE search, in microdollars. The admin API has long had this field; gateway 1.17.2 starts using it (with list-price fallbacks when it is 0) to bill provider-run web search and grounding. Omitted = Terraform does not manage it: nothing is sent and nothing is read back, so a price set in the dashboard stays. Removing it from the configuration keeps the current value; clear it in the dashboard. Must not be negative.
 
 ### Read-Only
 

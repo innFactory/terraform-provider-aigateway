@@ -895,3 +895,102 @@ func TestModelWindowAttributesAreOptionalComputedKeptAndValidated(t *testing.T) 
 }
 
 func i64p(n int64) *int64 { return &n }
+
+// search_per_query_microdollars is Optional-only: unset is never sent and never
+// reflected; set (including an explicit 0) is sent and follows the gateway.
+func TestModelSearchPriceOnTheWire(t *testing.T) {
+	for _, method := range []string{"POST", "PUT"} {
+		for _, tc := range []struct {
+			name string
+			cfg  types.Int64
+			want any // nil = key absent
+		}{
+			{"set", types.Int64Value(14000), float64(14000)},
+			{"explicit zero", types.Int64Value(0), float64(0)},
+			{"unset", types.Int64Null(), nil},
+		} {
+			t.Run(method+" "+tc.name, func(t *testing.T) {
+				var got map[string]any
+				r := modelTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+					if req.Method == method {
+						got = decodeBody(t, req)
+					}
+					out := modelAPI{ID: "model_abc", ModelID: "m", ProviderID: "p", ProviderModelID: "m", Capability: "chat", ModelType: "chat", Enabled: true}
+					if tc.cfg.ValueInt64() > 0 {
+						out.SearchPerQuery = i64p(tc.cfg.ValueInt64())
+					}
+					_ = json.NewEncoder(w).Encode(out)
+				})
+				m := testWindowModel(types.Int64Null(), types.Int64Null())
+				m.SearchPerQuery = tc.cfg
+				var failed bool
+				if method == "POST" {
+					resp := &resource.CreateResponse{State: mustModelState(t, m)}
+					r.Create(context.Background(), resource.CreateRequest{Plan: mustModelPlan(t, m), Config: mustModelConfig(t, m)}, resp)
+					failed = resp.Diagnostics.HasError()
+					if failed {
+						t.Fatalf("diagnostics: %v", resp.Diagnostics)
+					}
+					var st modelResourceModel
+					resp.State.Get(context.Background(), &st)
+					if !st.SearchPerQuery.Equal(tc.cfg) {
+						t.Errorf("state = %v, want the planned %v", st.SearchPerQuery, tc.cfg)
+					}
+				} else {
+					resp := &resource.UpdateResponse{State: mustModelState(t, m)}
+					r.Update(context.Background(), resource.UpdateRequest{Plan: mustModelPlan(t, m), State: mustModelState(t, m), Config: mustModelConfig(t, m)}, resp)
+					if resp.Diagnostics.HasError() {
+						t.Fatalf("diagnostics: %v", resp.Diagnostics)
+					}
+				}
+				val, present := got["searchPerQueryMicrodollars"]
+				if tc.want == nil && present {
+					t.Errorf("searchPerQueryMicrodollars must be absent, got %v", val)
+				}
+				if tc.want != nil && val != tc.want {
+					t.Errorf("searchPerQueryMicrodollars = %v, want %v", val, tc.want)
+				}
+			})
+		}
+	}
+}
+
+func TestModelApplySearchPriceOnlyWhenManaged(t *testing.T) {
+	r := &modelResource{}
+	unmanaged := testWindowModel(types.Int64Null(), types.Int64Null())
+	r.apply(&unmanaged, &modelAPI{ID: "model_abc", SearchPerQuery: i64p(14000)})
+	if !unmanaged.SearchPerQuery.IsNull() {
+		t.Errorf("an unmanaged search price must stay null, got %v", unmanaged.SearchPerQuery)
+	}
+	managed := testWindowModel(types.Int64Null(), types.Int64Null())
+	managed.SearchPerQuery = types.Int64Value(14000)
+	r.apply(&managed, &modelAPI{ID: "model_abc", SearchPerQuery: i64p(20000)})
+	if managed.SearchPerQuery.ValueInt64() != 20000 {
+		t.Errorf("a managed search price must follow the gateway, got %v", managed.SearchPerQuery)
+	}
+	r.apply(&managed, &modelAPI{ID: "model_abc"})
+	if managed.SearchPerQuery.IsNull() || managed.SearchPerQuery.ValueInt64() != 0 {
+		t.Errorf("an omitted price on a managed attribute reads as 0, got %v", managed.SearchPerQuery)
+	}
+}
+
+func TestModelSearchPriceRejectsNegative(t *testing.T) {
+	var resp resource.SchemaResponse
+	(&modelResource{}).Schema(context.Background(), resource.SchemaRequest{}, &resp)
+	attr, ok := resp.Schema.Attributes["search_per_query_microdollars"].(schema.Int64Attribute)
+	if !ok || !attr.Optional || attr.Computed {
+		t.Fatalf("search_per_query_microdollars must be Optional-only Int64, got %T %+v", resp.Schema.Attributes["search_per_query_microdollars"], attr)
+	}
+	for _, tc := range []struct {
+		v       int64
+		wantErr bool
+	}{{-1, true}, {0, false}, {14000, false}} {
+		var vresp validator.Int64Response
+		for _, val := range attr.Validators {
+			val.ValidateInt64(context.Background(), validator.Int64Request{Path: path.Root("search_per_query_microdollars"), ConfigValue: types.Int64Value(tc.v)}, &vresp)
+		}
+		if vresp.Diagnostics.HasError() != tc.wantErr {
+			t.Errorf("value %d: error = %v, want %v", tc.v, vresp.Diagnostics.HasError(), tc.wantErr)
+		}
+	}
+}

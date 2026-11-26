@@ -30,6 +30,12 @@ resource "aigateway_cost_center" "customer_a" {
   auto_add_new_users = false
   fallback_chain     = [aigateway_cost_center.companygpt.id]
 
+  # Gateway >= 1.17.2: only these models/providers for people booked here.
+  model_access = {
+    allowed_models    = ["gpt-5.4"]
+    allowed_providers = ["azure-openai-eu"]
+  }
+
   sub_limits = [
     {
       scope_type = "provider"
@@ -61,6 +67,7 @@ resource "aigateway_cost_center" "customer_a" {
 - `description` (String) Free-form description.
 - `fallback_chain` (List of String) Ordered list of cost center (budget) ids to fall back to when this center is exhausted.
 - `is_org` (Boolean) Mark as the org-level cost center.
+- `model_access` (Attribute) Models and providers the people booked on this cost center may use (gateway >= 1.17.2). A model is granted when its id or its provider id is listed. List at least one model or provider; `terraform plan` fails on an empty allowlist. Omitted = Terraform does not manage it: nothing is sent and nothing is read back, so a list set in the dashboard stays. Removing the block does NOT clear a list on the gateway; clear it in the dashboard. (see [below for nested schema](#nestedatt--model_access))
 - `monthly_cap` (String) Monthly cap as a decimal string (e.g. "500.00"); omit for unlimited (attribution-only).
 - `sub_limits` (Block List) Fine-grained caps within this budget, scoped to a provider/model/alias/router. Reconciled against the gateway sub-limit sub-resources on every apply. (see [below for nested schema](#nestedblock--sub_limits))
 - `weekly_cap` (String) Weekly cap as a decimal string. "0" blocks, a positive number caps, omit/null = unlimited (clearable). Must satisfy daily <= weekly <= monthly when set.
@@ -70,6 +77,14 @@ resource "aigateway_cost_center" "customer_a" {
 - `currency` (String) ISO 4217 currency code. Defaults to USD.
 - `id` (String) Server-assigned cost center (budget) uuid.
 - `mode` (String) Budget mode: pool (one shared counter) | per_user (a counter per member). Defaults to pool.
+
+<a id="nestedatt--model_access"></a>
+### Nested Schema for `model_access`
+
+Optional:
+
+- `allowed_models` (List of String) Model ids the cost center may use.
+- `allowed_providers` (List of String) Provider ids the cost center may use; every model of a listed provider is granted.
 
 <a id="nestedblock--sub_limits"></a>
 ### Nested Schema for `sub_limits`
